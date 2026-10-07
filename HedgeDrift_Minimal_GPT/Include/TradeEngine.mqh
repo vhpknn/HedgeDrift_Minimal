@@ -1,7 +1,7 @@
 #ifndef HEDGEDRIFT_TRADE_ENGINE_MQH
 #define HEDGEDRIFT_TRADE_ENGINE_MQH
 
-#include "Config.mqh"
+#include "RuntimeState.mqh"
 
 class CHDTradeEngine
 {
@@ -152,6 +152,51 @@ private:
       request.deviation    = 20;
       request.type_filling = filling;
       request.comment      = HD_OrderComment();
+
+      if(position_ticket == 0 && g_hd.hard_cut_loss)
+      {
+         double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+         double tick_size =
+            SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+
+         int digits = (int)SymbolInfoInteger(m_symbol, SYMBOL_DIGITS);
+
+         double minimum_distance =
+            SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL) * point;
+
+         if(point <= 0.0 || tick_size <= 0.0 ||
+            InpCutLossPoints <= 0)
+         {
+            Print("[HedgeDrift][ERROR] Invalid Hard SL settings.");
+            return false;
+         }
+
+         double sl = buy
+            ? request.price - InpCutLossPoints * point
+            : request.price + InpCutLossPoints * point;
+
+         // Round inward: never enlarge the configured risk distance.
+         sl = buy
+            ? MathCeil(sl / tick_size - 1e-9) * tick_size
+            : MathFloor(sl / tick_size + 1e-9) * tick_size;
+
+         sl = NormalizeDouble(sl, digits);
+
+         bool valid = buy
+            ? sl > 0.0 && sl < tick.bid &&
+              tick.bid - sl >= minimum_distance
+            : sl > tick.ask &&
+              sl - tick.ask >= minimum_distance;
+
+         if(!valid)
+         {
+            Print("[HedgeDrift][ERROR] Hard SL distance invalid. ",
+                  "Order rejected; SL will not be removed or widened.");
+            return false;
+         }
+
+         request.sl = sl;
+      }
 
       ResetLastError();
       bool sent = OrderSend(request, m_result);
@@ -341,6 +386,95 @@ public:
 
       m_busy = false;
       return result;
+   }
+
+   bool ModifyStop(const ulong ticket, const double new_sl)
+   {
+      if(m_busy || !TradingAllowed())
+         return false;
+
+      if(!PositionSelectByTicket(ticket))
+         return false;
+
+      if(PositionGetString(POSITION_SYMBOL) != m_symbol ||
+         (ulong)PositionGetInteger(POSITION_MAGIC) != m_magic)
+         return false;
+
+      ENUM_POSITION_TYPE type =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      bool buy = type == POSITION_TYPE_BUY;
+      double old_sl = PositionGetDouble(POSITION_SL);
+      double tp = PositionGetDouble(POSITION_TP);
+
+      double point = SymbolInfoDouble(m_symbol, SYMBOL_POINT);
+      double tick_size =
+         SymbolInfoDouble(m_symbol, SYMBOL_TRADE_TICK_SIZE);
+
+      if(point <= 0.0 || tick_size <= 0.0 || new_sl <= 0.0)
+         return false;
+
+      if(old_sl > 0.0)
+      {
+         if(buy && new_sl <= old_sl + tick_size * 0.5)
+            return false;
+
+         if(!buy && new_sl >= old_sl - tick_size * 0.5)
+            return false;
+      }
+
+      MqlTick tick;
+      if(!SymbolInfoTick(m_symbol, tick))
+         return false;
+
+      long stops =
+         SymbolInfoInteger(m_symbol, SYMBOL_TRADE_STOPS_LEVEL);
+
+      long freeze =
+         SymbolInfoInteger(m_symbol, SYMBOL_TRADE_FREEZE_LEVEL);
+
+      double required = MathMax((double)stops, (double)freeze) * point;
+      double market = buy ? tick.bid : tick.ask;
+      double distance = buy ? market - new_sl : new_sl - market;
+
+      if(distance <= 0.0 || distance <= required)
+         return false;
+
+      if(old_sl > 0.0 && freeze > 0)
+      {
+         double old_distance = buy ? market - old_sl : old_sl - market;
+         if(old_distance <= freeze * point)
+            return false;
+      }
+
+      MqlTradeRequest request;
+      MqlTradeResult result;
+      ZeroMemory(request);
+      ZeroMemory(result);
+
+      request.action   = TRADE_ACTION_SLTP;
+      request.symbol   = m_symbol;
+      request.position = ticket;
+      request.magic    = m_magic;
+      request.sl       = new_sl;
+      request.tp       = tp;
+
+      m_busy = true;
+      bool sent = OrderSend(request, result);
+      m_busy = false;
+
+      bool success =
+         sent &&
+         (result.retcode == TRADE_RETCODE_DONE ||
+          result.retcode == TRADE_RETCODE_NO_CHANGES);
+
+      Print("[HedgeDrift][", success ? "INFO" : "ERROR", "] ",
+            "Modify SL ticket=", ticket,
+            " SL=", DoubleToString(new_sl, _Digits),
+            " Retcode=", result.retcode,
+            " Comment=", result.comment);
+
+      return success;
    }
 
    bool CloseAll()
