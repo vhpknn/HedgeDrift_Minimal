@@ -11,6 +11,8 @@ private:
    string m_symbol;
    ulong  m_magic;
    bool   m_busy;
+   bool   m_open_attempted;
+   double m_open_requested_volume;
 
    bool CheckResult(const bool sent, const string action)
    {
@@ -231,6 +233,12 @@ private:
             position_ticket);
       }
 
+      if(position_ticket == 0)
+      {
+         m_open_attempted = true;
+         m_open_requested_volume = request.volume;
+      }
+
       ResetLastError();
       bool sent = OrderSend(request, m_result);
       int error = GetLastError();
@@ -348,6 +356,46 @@ public:
       return true;
    }
 
+   void GetOpeningReceipt(bool &no_execution,
+                          uint &retcode,
+                          ulong &order_ticket,
+                          ulong &deal_ticket,
+                          double &requested_volume)
+   {
+      retcode = m_result.retcode;
+      order_ticket = m_result.order;
+      deal_ticket = m_result.deal;
+      requested_volume = m_open_requested_volume;
+
+      no_execution = !m_open_attempted;
+
+      if(no_execution)
+         return;
+
+      // Any execution reference prevents a negative classification.
+      if(order_ticket != 0 || deal_ticket != 0)
+         return;
+
+      switch(retcode)
+      {
+         case TRADE_RETCODE_REJECT:
+         case TRADE_RETCODE_INVALID:
+         case TRADE_RETCODE_INVALID_VOLUME:
+         case TRADE_RETCODE_INVALID_PRICE:
+         case TRADE_RETCODE_INVALID_STOPS:
+         case TRADE_RETCODE_TRADE_DISABLED:
+         case TRADE_RETCODE_MARKET_CLOSED:
+         case TRADE_RETCODE_NO_MONEY:
+         case TRADE_RETCODE_INVALID_FILL:
+            no_execution = true;
+            break;
+
+         default:
+            // PLACED, TIMEOUT, CONNECTION and unknown results stay unresolved.
+            break;
+      }
+   }
+
    int CountSide(const ENUM_POSITION_TYPE side)
    {
       int count = 0;
@@ -418,6 +466,10 @@ public:
    bool OpenMissingSide(const ENUM_POSITION_TYPE side,
                         const double requested_lot)
    {
+      m_open_attempted = false;
+      m_open_requested_volume = 0.0;
+      ZeroMemory(m_result);
+
       if(m_busy || !TradingAllowed() || PendingCount() > 0)
          return false;
 

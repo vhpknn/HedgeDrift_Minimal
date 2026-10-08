@@ -387,7 +387,8 @@ public:
       m_peak_dirty = false;
    }
 
-   bool RegisterReplacement(const ulong ticket)
+   bool RegisterReplacement(const ulong ticket,
+                            const double original_sl = 0.0)
    {
       if(!CanReHedge() || !PositionSelectByTicket(ticket) ||
          !OwnedSelected())
@@ -444,9 +445,12 @@ public:
          slot = count;
       }
 
+      double initial_sl = original_sl > 0.0 ? original_sl : sl;
+
       m_items[slot].identifier = identifier;
-      m_items[slot].initial_sl = sl;
-      m_items[slot].hard_sl = g_hd.hard_cut_loss && sl > 0.0;
+      m_items[slot].initial_sl = initial_sl;
+      m_items[slot].hard_sl =
+         g_hd.hard_cut_loss && initial_sl > 0.0;
       m_items[slot].side = side;
       m_items[slot].side_known = true;
       m_items[slot].best_price = 0.0;

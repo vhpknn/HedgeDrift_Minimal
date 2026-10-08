@@ -272,6 +272,177 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
    return opened && count > 0;
 }
 
+struct HD_ReHedgeHistory
+{
+   ulong identifier;
+   double opened_volume;
+   double closed_volume;
+   double original_sl;
+   double volume_tolerance;
+   datetime closed_time;
+};
+
+bool HD_ReadReHedgeHistory(HD_ReHedgeHistory &evidence)
+{
+   ZeroMemory(evidence);
+
+   ENUM_POSITION_TYPE side = g_strategy.ReHedgeIntentSide();
+
+   if(side != POSITION_TYPE_BUY && side != POSITION_TYPE_SELL)
+      return false;
+
+   double requested = g_strategy.ReHedgeRequestedVolume();
+   double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+   if(!MathIsValidNumber(requested) || requested <= 0.0 ||
+      !MathIsValidNumber(step) || step <= 0.0)
+      return false;
+
+   ulong order = g_strategy.ReHedgeOrder();
+   ulong receipt_deal = g_strategy.ReHedgeDeal();
+
+   ENUM_DEAL_TYPE opening_type =
+      side == POSITION_TYPE_BUY ? DEAL_TYPE_BUY : DEAL_TYPE_SELL;
+
+   ENUM_ORDER_TYPE order_type =
+      side == POSITION_TYPE_BUY ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+
+   if(receipt_deal != 0)
+   {
+      if(!HistoryDealSelect(receipt_deal))
+         return false;
+
+      if(HistoryDealGetString(receipt_deal, DEAL_SYMBOL) != _Symbol ||
+         (ulong)HistoryDealGetInteger(receipt_deal, DEAL_MAGIC) !=
+            InpMagicNumber ||
+         (ENUM_DEAL_ENTRY)HistoryDealGetInteger(receipt_deal, DEAL_ENTRY) !=
+            DEAL_ENTRY_IN ||
+         (ENUM_DEAL_TYPE)HistoryDealGetInteger(receipt_deal, DEAL_TYPE) !=
+            opening_type)
+         return false;
+
+      ulong deal_order =
+         (ulong)HistoryDealGetInteger(receipt_deal, DEAL_ORDER);
+
+      if(deal_order == 0 || (order != 0 && order != deal_order))
+         return false;
+
+      order = deal_order;
+   }
+
+   if(order == 0 || !HistoryOrderSelect(order))
+      return false;
+
+   if(HistoryOrderGetString(order, ORDER_SYMBOL) != _Symbol ||
+      (ulong)HistoryOrderGetInteger(order, ORDER_MAGIC) != InpMagicNumber ||
+      (ENUM_ORDER_TYPE)HistoryOrderGetInteger(order, ORDER_TYPE) !=
+         order_type ||
+      (ENUM_ORDER_STATE)HistoryOrderGetInteger(order, ORDER_STATE) !=
+         ORDER_STATE_FILLED)
+      return false;
+
+   datetime setup =
+      (datetime)HistoryOrderGetInteger(order, ORDER_TIME_SETUP);
+
+   if(setup < g_strategy.ReHedgeIntentTime() - 1)
+      return false;
+
+   evidence.identifier =
+      (ulong)HistoryOrderGetInteger(order, ORDER_POSITION_ID);
+
+   evidence.original_sl = HistoryOrderGetDouble(order, ORDER_SL);
+
+   if(evidence.identifier == 0 ||
+      !MathIsValidNumber(evidence.original_sl) ||
+      evidence.original_sl < 0.0 ||
+      (g_hd.hard_cut_loss && evidence.original_sl <= 0.0))
+      return false;
+
+   if(!HistorySelectByPosition(evidence.identifier))
+      return false;
+
+   bool receipt_seen = receipt_deal == 0;
+   long last_close_msc = 0;
+   int total = HistoryDealsTotal();
+
+   for(int i = 0; i < total; i++)
+   {
+      ulong deal = HistoryDealGetTicket(i);
+
+      if(deal == 0)
+         return false;
+
+      ENUM_DEAL_TYPE type =
+         (ENUM_DEAL_TYPE)HistoryDealGetInteger(deal, DEAL_TYPE);
+
+      if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+         continue;
+
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol ||
+         (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) !=
+            evidence.identifier)
+         return false;
+
+      double volume = HistoryDealGetDouble(deal, DEAL_VOLUME);
+
+      if(!MathIsValidNumber(volume) || volume <= 0.0)
+         return false;
+
+      ENUM_DEAL_ENTRY entry =
+         (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+
+      if(entry == DEAL_ENTRY_IN)
+      {
+         if(type != opening_type ||
+            (ulong)HistoryDealGetInteger(deal, DEAL_MAGIC) !=
+               InpMagicNumber ||
+            (ulong)HistoryDealGetInteger(deal, DEAL_ORDER) != order)
+            return false;
+
+         evidence.opened_volume += volume;
+
+         if(deal == receipt_deal)
+            receipt_seen = true;
+      }
+      else if(entry == DEAL_ENTRY_OUT || entry == DEAL_ENTRY_OUT_BY)
+      {
+         if(type == opening_type)
+            return false;
+
+         evidence.closed_volume += volume;
+
+         long closed_msc =
+            HistoryDealGetInteger(deal, DEAL_TIME_MSC);
+
+         if(closed_msc > last_close_msc)
+            last_close_msc = closed_msc;
+      }
+      else
+         return false;
+   }
+
+   if(!receipt_seen ||
+      !MathIsValidNumber(evidence.opened_volume) ||
+      !MathIsValidNumber(evidence.closed_volume))
+      return false;
+
+   evidence.volume_tolerance = MathMax(
+      step * 1e-7,
+      8.0 * DBL_EPSILON *
+         MathMax(requested, evidence.opened_volume)
+   );
+
+   if(MathAbs(evidence.opened_volume - requested) >
+         evidence.volume_tolerance ||
+      evidence.closed_volume >
+         evidence.opened_volume + evidence.volume_tolerance)
+      return false;
+
+   evidence.closed_time = (datetime)(last_close_msc / 1000);
+
+   return true;
+}
+
 bool HD_ResolveReHedgeIntent()
 {
    if(!g_strategy.HasReHedgeIntent())
@@ -286,9 +457,80 @@ bool HD_ResolveReHedgeIntent()
    if(count > 1)
       return false;
 
+   if(g_strategy.ReHedgeNoExecution())
+   {
+      if(count != 0)
+         return false;
+
+      if(g_audit.Active())
+      {
+         g_audit.Record("RH_NO_EXECUTION_CONFIRMED",
+            "{\"side\":" + IntegerToString((int)side) +
+            ",\"intent_since\":" +
+            g_audit.U((ulong)g_strategy.ReHedgeIntentTime()) + "}");
+      }
+
+      g_strategy.FinishReHedgeIntent(false);
+      return true;
+   }
+
+   HD_ReHedgeHistory evidence;
+
+   if(!HD_ReadReHedgeHistory(evidence))
+   {
+      if(g_recovery_ok)
+      {
+         Print("[HedgeDrift][ERROR] Re-Hedge history evidence incomplete. ",
+               "Partial, unknown or conflicting execution remains blocked.");
+
+         if(g_audit.Active())
+            g_audit.Record("RH_HISTORY_UNRESOLVED",
+               "{\"side\":" + IntegerToString((int)side) + "}",
+               0, g_strategy.ReHedgeOrder(),
+               g_strategy.ReHedgeDeal(), "ERROR");
+      }
+
+      return false;
+   }
+
+   double remaining =
+      evidence.opened_volume - evidence.closed_volume;
+
    if(count == 0)
    {
-      g_strategy.FinishReHedgeIntent(false);
+      if(MathAbs(remaining) > evidence.volume_tolerance ||
+         evidence.closed_time <= 0)
+         return false;
+
+      // Do not replay a historical Re-Lock out of chronological order.
+      if(g_hd.strategy == MODE_LOCK_PRICE && g_hd.cut_loss_relock)
+      {
+         if(g_recovery_ok)
+            Print("[HedgeDrift][ERROR] Closed replacement requires ",
+                  "chronological HardCut Re-Lock recovery.");
+
+         return false;
+      }
+
+      if(!HD_ReconcileDeals(true))
+         return false;
+
+      if(!g_strategy.FinishClosedReHedgeIntent(evidence.closed_time))
+         return false;
+
+      HD_SetCycle(HD_IDLE);
+
+      if(g_audit.Active())
+      {
+         g_audit.Record("RH_FILLED_THEN_CLOSED",
+            "{\"side\":" + IntegerToString((int)side) +
+            ",\"identifier\":" + g_audit.U(evidence.identifier) +
+            ",\"closed_time\":" +
+            g_audit.U((ulong)evidence.closed_time) +
+            ",\"opened_volume\":" + g_audit.D(evidence.opened_volume) +
+            ",\"closed_volume\":" + g_audit.D(evidence.closed_volume) + "}");
+      }
+
       return true;
    }
 
@@ -297,16 +539,26 @@ bool HD_ResolveReHedgeIntent()
    if(ticket == 0 || !PositionSelectByTicket(ticket))
       return false;
 
-   datetime opened =
-      (datetime)PositionGetInteger(POSITION_TIME);
+   ulong live_identifier =
+      (ulong)PositionGetInteger(POSITION_IDENTIFIER);
 
-   if(opened < g_strategy.ReHedgeIntentTime() - 1)
+   ENUM_POSITION_TYPE live_side =
+      (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+   double live_volume = PositionGetDouble(POSITION_VOLUME);
+
+   if(live_identifier != evidence.identifier ||
+      live_side != side ||
+      remaining <= evidence.volume_tolerance ||
+      !MathIsValidNumber(live_volume) ||
+      MathAbs(live_volume - remaining) > evidence.volume_tolerance)
    {
-      Print("[HedgeDrift][ERROR] Re-Hedge intent does not match position time.");
+      Print("[HedgeDrift][ERROR] Live replacement does not match ",
+            "the saved request and history evidence.");
       return false;
    }
 
-   if(!g_risk.RegisterReplacement(ticket))
+   if(!g_risk.RegisterReplacement(ticket, evidence.original_sl))
       return false;
 
    g_strategy.FinishReHedgeIntent(true);
@@ -388,9 +640,45 @@ bool HD_RunReHedgeHelper()
    g_strategy.BeginReHedgeIntent(side);
 
    if(!HD_SaveState())
+   {
+      // This invocation has not called the Trade Engine.
+      g_strategy.SetReHedgeReceipt(true, 0, 0, 0);
       return false;
+   }
 
    g_trade.OpenMissingSide(side, InpStartLot);
+
+   bool no_execution = false;
+   uint retcode = 0;
+   ulong order_ticket = 0;
+   ulong deal_ticket = 0;
+   double requested_volume = 0.0;
+
+   g_trade.GetOpeningReceipt(
+      no_execution, retcode, order_ticket, deal_ticket,
+      requested_volume
+   );
+
+   g_strategy.SetReHedgeReceipt(
+      no_execution, retcode, order_ticket, deal_ticket,
+      requested_volume
+   );
+
+   if(g_audit.Active())
+   {
+      g_audit.Record("RH_REQUEST_RECEIPT",
+         "{\"side\":" + IntegerToString((int)side) +
+         ",\"no_execution\":" + g_audit.Bool(no_execution) +
+         ",\"retcode\":" + IntegerToString((int)retcode) +
+         ",\"requested_volume\":" + g_audit.D(requested_volume) +
+         ",\"order\":" + g_audit.U(order_ticket) +
+         ",\"deal\":" + g_audit.U(deal_ticket) + "}",
+         0, order_ticket, deal_ticket);
+   }
+
+   // Persist the receipt before clearing or resolving the intent.
+   if(!HD_SaveState())
+      return true;
 
    if(!HD_ResolveReHedgeIntent())
    {

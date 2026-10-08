@@ -25,6 +25,21 @@ private:
    ENUM_POSITION_TYPE m_rh_side;
    datetime m_rh_intent_since;
 
+   bool m_rh_no_execution;
+   uint m_rh_retcode;
+   ulong m_rh_order;
+   ulong m_rh_deal;
+   double m_rh_requested_volume;
+
+   void ClearReHedgeReceipt()
+   {
+      m_rh_no_execution = false;
+      m_rh_retcode = 0;
+      m_rh_order = 0;
+      m_rh_deal = 0;
+      m_rh_requested_volume = 0.0;
+   }
+
    bool InSession(const string range, const int now_minutes)
    {
       int start_minutes = 0;
@@ -62,6 +77,7 @@ public:
       m_rh_intent = false;
       m_rh_side = POSITION_TYPE_BUY;
       m_rh_intent_since = 0;
+      ClearReHedgeReceipt();
    }
 
    void SaveState(CHDPersistence &state)
@@ -80,6 +96,13 @@ public:
       state.PutU("rh_intent", (ulong)m_rh_intent);
       state.PutU("rh_side", (ulong)m_rh_side);
       state.PutU("rh_intent_since", (ulong)m_rh_intent_since);
+
+      state.PutU("rh_receipt_version", 2);
+      state.PutU("rh_no_execution", (ulong)m_rh_no_execution);
+      state.PutU("rh_retcode", (ulong)m_rh_retcode);
+      state.PutU("rh_order", m_rh_order);
+      state.PutU("rh_deal", m_rh_deal);
+      state.PutD("rh_requested_volume", m_rh_requested_volume);
    }
 
    bool LoadState(CHDPersistence &state)
@@ -97,6 +120,7 @@ public:
       m_rh_intent = false;
       m_rh_side = POSITION_TYPE_BUY;
       m_rh_intent_since = 0;
+      ClearReHedgeReceipt();
 
       bool extended = state.Has("rh_version");
 
@@ -128,6 +152,46 @@ public:
             return false;
       }
 
+      if(state.Has("rh_receipt_version"))
+      {
+         int receipt_version = state.I("rh_receipt_version");
+
+         if(receipt_version != 1 && receipt_version != 2)
+            return false;
+
+         m_rh_no_execution = state.B("rh_no_execution");
+         m_rh_retcode = (uint)state.I("rh_retcode");
+         m_rh_order = state.U("rh_order");
+         m_rh_deal = state.U("rh_deal");
+
+         if(receipt_version == 2)
+            m_rh_requested_volume = state.D("rh_requested_volume");
+
+         if(!MathIsValidNumber(m_rh_requested_volume) ||
+            m_rh_requested_volume < 0.0)
+            return false;
+
+         if(m_rh_no_execution &&
+            (m_rh_order != 0 || m_rh_deal != 0))
+            return false;
+
+         if(receipt_version == 2 &&
+            (m_rh_order != 0 || m_rh_deal != 0) &&
+            m_rh_requested_volume <= 0.0)
+            return false;
+
+         if(!m_rh_intent &&
+            (m_rh_no_execution ||
+             m_rh_retcode != 0 ||
+             m_rh_order != 0 ||
+             m_rh_deal != 0 ||
+             m_rh_requested_volume != 0.0))
+            return false;
+
+         if(!state.Good())
+            return false;
+      }
+
       // Do not replay a crossing from the EA downtime.
       m_previous = 0.0;
       m_previous_valid = false;
@@ -152,6 +216,7 @@ public:
       if(!InpEnableAutoReHedge)
          return;
 
+      ClearReHedgeReceipt();
       m_rh_armed = true;
       m_buy_wait = false;
       m_sell_wait = false;
@@ -168,6 +233,8 @@ public:
 
    void StopReHedge()
    {
+      ClearReHedgeReceipt();
+
       bool had_state =
          m_rh_armed || m_buy_wait || m_sell_wait || m_rh_intent;
 
@@ -305,6 +372,7 @@ public:
 
    void BeginReHedgeIntent(const ENUM_POSITION_TYPE side)
    {
+      ClearReHedgeReceipt();
       m_rh_intent = true;
       m_rh_side = side;
       m_rh_intent_since = TimeCurrent();
@@ -324,6 +392,51 @@ public:
       }
    }
 
+   void SetReHedgeReceipt(const bool no_execution,
+                         const uint retcode,
+                         const ulong order_ticket,
+                         const ulong deal_ticket,
+                         const double requested_volume = 0.0)
+   {
+      if(!m_rh_intent)
+         return;
+
+      m_rh_retcode = retcode;
+      m_rh_order = order_ticket;
+      m_rh_deal = deal_ticket;
+      m_rh_requested_volume = requested_volume;
+
+      m_rh_no_execution =
+         no_execution &&
+         order_ticket == 0 &&
+         deal_ticket == 0;
+   }
+
+   bool ReHedgeNoExecution()
+   {
+      return m_rh_intent && m_rh_no_execution;
+   }
+
+   ulong ReHedgeOrder()
+   {
+      return m_rh_order;
+   }
+
+   ulong ReHedgeDeal()
+   {
+      return m_rh_deal;
+   }
+
+   double ReHedgeRequestedVolume()
+   {
+      return m_rh_requested_volume;
+   }
+
+   uint ReHedgeRetcode()
+   {
+      return m_rh_retcode;
+   }
+
    bool HasReHedgeIntent()
    {
       return m_rh_intent;
@@ -339,8 +452,44 @@ public:
       return m_rh_intent_since;
    }
 
+   bool FinishClosedReHedgeIntent(const datetime closed_time)
+   {
+      if(!m_rh_intent || !ReHedgeActive() ||
+         closed_time <= 0 ||
+         closed_time < m_rh_intent_since - 1)
+         return false;
+
+      if(m_rh_side == POSITION_TYPE_BUY)
+      {
+         m_buy_wait = true;
+
+         if(closed_time > m_buy_since)
+            m_buy_since = closed_time;
+      }
+      else if(m_rh_side == POSITION_TYPE_SELL)
+      {
+         m_sell_wait = true;
+
+         if(closed_time > m_sell_since)
+            m_sell_since = closed_time;
+      }
+      else
+         return false;
+
+      m_rh_intent = false;
+      m_rh_intent_since = 0;
+      ClearReHedgeReceipt();
+
+      m_seen_basket = true;
+      m_spent = true;
+
+      return true;
+   }
+
    void FinishReHedgeIntent(const bool filled)
    {
+      ClearReHedgeReceipt();
+
       if(filled)
       {
          if(m_rh_side == POSITION_TYPE_BUY)
