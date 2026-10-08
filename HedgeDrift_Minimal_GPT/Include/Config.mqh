@@ -81,6 +81,34 @@ input bool InpPersistenceInTester = false;    // อนุญาต Persistence 
 input group "ตัวตน EA / Identity"
 input ulong InpMagicNumber = 998874;          // รหัสเจ้าของสถานะและไฟล์ State ของ EA
 
+double HD_PriceTolerance(const double first_price,
+                         const double second_price,
+                         const double point)
+{
+   double scale =
+      MathMax(MathAbs(first_price), MathAbs(second_price));
+
+   return MathMax(
+      point * 1e-7,
+      8.0 * DBL_EPSILON * scale
+   );
+}
+
+bool HD_ReadValidTick(const string symbol, MqlTick &tick)
+{
+   ZeroMemory(tick);
+
+   if(!SymbolInfoTick(symbol, tick))
+      return false;
+
+   return
+      MathIsValidNumber(tick.bid) &&
+      MathIsValidNumber(tick.ask) &&
+      tick.bid > 0.0 &&
+      tick.ask > 0.0 &&
+      tick.ask >= tick.bid;
+}
+
 string HD_OrderComment()
 {
    return "HedgeDrift_RR1:"

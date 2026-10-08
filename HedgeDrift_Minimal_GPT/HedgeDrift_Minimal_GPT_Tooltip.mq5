@@ -408,11 +408,17 @@ void HD_RunPhase3()
 {
    HD_ReconcileDeals(false);
 
-   if(!HD_ResolveReHedgeIntent())
+   bool intent_ok = HD_ResolveReHedgeIntent();
+
+   if(!intent_ok)
    {
+      if(g_recovery_ok)
+      {
+         Print("[HedgeDrift][ERROR] Replacement intent mismatch. ",
+               "New entries blocked; existing Risk Engine remains active.");
+      }
+
       g_recovery_ok = false;
-      Print("[HedgeDrift][ERROR] Replacement intent mismatch.");
-      return;
    }
 
    // Existing risk still runs even when new entries are blocked.
@@ -429,7 +435,7 @@ void HD_RunPhase3()
    if(!risk_action)
       trailing_action = HD_RunTrailingHelper();
 
-   if(!risk_action && !trailing_action)
+   if(!risk_action && !trailing_action && intent_ok)
       HD_RunReHedgeHelper();
 
    if(g_trade.Count() == 0)

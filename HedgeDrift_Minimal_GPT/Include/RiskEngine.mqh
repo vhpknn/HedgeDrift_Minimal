@@ -153,6 +153,12 @@ public:
          if(m_items[i].identifier == 0 ||
             m_items[i].initial_sl < 0.0)
             return false;
+
+         for(int j = 0; j < i; j++)
+         {
+            if(m_items[j].identifier == m_items[i].identifier)
+               return false;
+         }
       }
 
       return state.Good();
@@ -178,6 +184,13 @@ public:
          {
             if(m_items[j].identifier != identifier)
                continue;
+
+            ENUM_POSITION_TYPE live_side =
+               (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+            if(m_items[j].side_known &&
+               m_items[j].side != live_side)
+               return false;
 
             if(m_items[j].hard_sl &&
                PositionGetDouble(POSITION_SL) <= 0.0)
@@ -455,8 +468,7 @@ public:
 
       MqlTick tick;
 
-      if(!SymbolInfoTick(_Symbol, tick) ||
-         tick.bid <= 0.0 || tick.ask <= 0.0)
+      if(!HD_ReadValidTick(_Symbol, tick))
          return;
 
       for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -531,7 +543,7 @@ public:
          return false;
 
       MqlTick tick;
-      if(!SymbolInfoTick(_Symbol, tick))
+      if(!HD_ReadValidTick(_Symbol, tick))
          return false;
 
       double distance = InpTrailingStepPoints * point;
@@ -563,12 +575,21 @@ public:
                      !m_items[j].peak_ready)
                      continue;
 
+                  double guard_market =
+                     guard_side == POSITION_TYPE_BUY
+                     ? tick.bid : tick.ask;
+
                   double guard_reversal =
                      guard_side == POSITION_TYPE_BUY
-                     ? m_items[j].best_price - tick.bid
-                     : tick.ask - m_items[j].best_price;
+                     ? m_items[j].best_price - guard_market
+                     : guard_market - m_items[j].best_price;
 
-                  threshold_reached = guard_reversal >= distance;
+                  double guard_tolerance = HD_PriceTolerance(
+                     m_items[j].best_price, guard_market, point
+                  );
+
+                  threshold_reached =
+                     guard_reversal + guard_tolerance >= distance;
 
                   if(threshold_reached &&
                      g_audit.Gate("TRAIL_PROFIT_BLOCK", ticket))
@@ -610,11 +631,19 @@ public:
                !m_items[j].peak_ready)
                continue;
 
-            double reversal = side == POSITION_TYPE_BUY
-               ? m_items[j].best_price - tick.bid
-               : tick.ask - m_items[j].best_price;
+            double market =
+               side == POSITION_TYPE_BUY ? tick.bid : tick.ask;
 
-            if(!m_items[j].trail_pending && reversal < distance)
+            double reversal = side == POSITION_TYPE_BUY
+               ? m_items[j].best_price - market
+               : market - m_items[j].best_price;
+
+            double tolerance = HD_PriceTolerance(
+               m_items[j].best_price, market, point
+            );
+
+            if(!m_items[j].trail_pending &&
+               reversal + tolerance < distance)
                break;
 
             if(!m_items[j].trail_pending)
@@ -723,7 +752,7 @@ public:
          return false;
 
       MqlTick tick;
-      if(!SymbolInfoTick(_Symbol, tick))
+      if(!HD_ReadValidTick(_Symbol, tick))
          return false;
 
       for(int i = PositionsTotal() - 1; i >= 0; i--)
@@ -739,19 +768,28 @@ public:
          double open = PositionGetDouble(POSITION_PRICE_OPEN);
          double current_sl = PositionGetDouble(POSITION_SL);
 
-         double profit_points =
-            buy ? (tick.bid - open) / point
-                : (open - tick.ask) / point;
+         double market = buy ? tick.bid : tick.ask;
 
-         if(profit_points < InpBETriggerPoints)
+         double profit_points =
+            buy ? (market - open) / point
+                : (open - market) / point;
+
+         double tolerance_points =
+            HD_PriceTolerance(open, market, point) / point;
+
+         if(profit_points + tolerance_points < InpBETriggerPoints)
             continue;
 
          double basis = InpBETriggerPoints;
 
          if(g_hd.be_type == BE_TYPE_DYNAMIC)
          {
-            basis += 10.0 *
-               MathFloor((profit_points - InpBETriggerPoints) / 10.0);
+            double excess_points = MathMax(
+               0.0,
+               profit_points - InpBETriggerPoints + tolerance_points
+            );
+
+            basis += 10.0 * MathFloor(excess_points / 10.0);
          }
 
          double lock_points = basis * InpBELockPercent / 100.0;

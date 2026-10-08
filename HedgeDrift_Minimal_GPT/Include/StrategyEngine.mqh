@@ -174,6 +174,8 @@ public:
       m_rh_armed = false;
       m_buy_wait = false;
       m_sell_wait = false;
+      m_buy_since = 0;
+      m_sell_since = 0;
       m_rh_intent = false;
       m_rh_intent_since = 0;
 
@@ -262,21 +264,43 @@ public:
 
       datetime now = TimeCurrent();
 
-      if(buys == 0 && m_buy_wait &&
-         now - m_buy_since >= InpTimeoutSeconds)
+      bool buy_due =
+         buys == 0 &&
+         m_buy_wait &&
+         m_buy_since > 0 &&
+         now - m_buy_since >= InpTimeoutSeconds;
+
+      bool sell_due =
+         sells == 0 &&
+         m_sell_wait &&
+         m_sell_since > 0 &&
+         now - m_sell_since >= InpTimeoutSeconds;
+
+      if(!buy_due && !sell_due)
+         return false;
+
+      if(buy_due && sell_due)
       {
-         side = POSITION_TYPE_BUY;
-         return true;
+         if(m_buy_since < m_sell_since)
+            side = POSITION_TYPE_BUY;
+         else if(m_sell_since < m_buy_since)
+            side = POSITION_TYPE_SELL;
+         else
+         {
+            // Alternate equal-time ties using the last selected side.
+            side = m_rh_side == POSITION_TYPE_BUY
+               ? POSITION_TYPE_SELL
+               : POSITION_TYPE_BUY;
+         }
+      }
+      else
+      {
+         side = buy_due
+            ? POSITION_TYPE_BUY
+            : POSITION_TYPE_SELL;
       }
 
-      if(sells == 0 && m_sell_wait &&
-         now - m_sell_since >= InpTimeoutSeconds)
-      {
-         side = POSITION_TYPE_SELL;
-         return true;
-      }
-
-      return false;
+      return true;
    }
 
    void BeginReHedgeIntent(const ENUM_POSITION_TYPE side)
@@ -420,8 +444,7 @@ public:
    bool Signal(const int positions, ENUM_TRADE_DIRECTION &direction)
    {
       MqlTick tick;
-      if(!SymbolInfoTick(_Symbol, tick) ||
-         tick.bid <= 0.0 || tick.ask <= 0.0)
+      if(!HD_ReadValidTick(_Symbol, tick))
          return false;
 
       double price = (tick.bid + tick.ask) / 2.0;

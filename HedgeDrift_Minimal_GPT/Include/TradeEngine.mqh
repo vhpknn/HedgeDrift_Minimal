@@ -133,8 +133,7 @@ private:
       MqlTick tick;
       ZeroMemory(tick);
 
-      if(!SymbolInfoTick(m_symbol, tick) ||
-         tick.bid <= 0.0 || tick.ask <= 0.0)
+      if(!HD_ReadValidTick(m_symbol, tick))
       {
          Print("[HedgeDrift][ERROR] No valid quote for ", action);
          return false;
@@ -183,11 +182,17 @@ private:
 
          sl = NormalizeDouble(sl, digits);
 
-         bool valid = buy
-            ? sl > 0.0 && sl < tick.bid &&
-              tick.bid - sl >= minimum_distance
-            : sl > tick.ask &&
-              sl - tick.ask >= minimum_distance;
+         double market = buy ? tick.bid : tick.ask;
+         double distance = buy ? market - sl : sl - market;
+
+         double tolerance = HD_PriceTolerance(
+            market, sl, point
+         );
+
+         bool valid =
+            sl > 0.0 &&
+            distance > 0.0 &&
+            distance + tolerance >= minimum_distance;
 
          if(!valid)
          {
@@ -579,7 +584,7 @@ public:
       }
 
       MqlTick tick;
-      if(!SymbolInfoTick(m_symbol, tick))
+      if(!HD_ReadValidTick(m_symbol, tick))
          return false;
 
       long stops =
@@ -588,11 +593,28 @@ public:
       long freeze =
          SymbolInfoInteger(m_symbol, SYMBOL_TRADE_FREEZE_LEVEL);
 
-      double required = MathMax((double)stops, (double)freeze) * point;
+      double stops_distance = (double)stops * point;
+      double freeze_distance = (double)freeze * point;
+
+      // Retained for the existing Audit diagnostic field.
+      double required = MathMax(stops_distance, freeze_distance);
+
       double market = buy ? tick.bid : tick.ask;
       double distance = buy ? market - new_sl : new_sl - market;
 
-      if(distance <= 0.0 || distance <= required)
+      double tolerance = HD_PriceTolerance(
+         market, new_sl, point
+      );
+
+      bool stops_blocked =
+         distance + tolerance < stops_distance;
+
+      // Keep a conservative no-touch boundary for Freeze Level.
+      bool freeze_blocked =
+         freeze > 0 &&
+         distance <= freeze_distance + tolerance;
+
+      if(distance <= 0.0 || stops_blocked || freeze_blocked)
       {
          if(g_audit.Active() && g_audit.Gate("SL_DISTANCE_BLOCK", ticket))
          {
@@ -612,9 +634,14 @@ public:
 
       if(old_sl > 0.0 && freeze > 0)
       {
-         double old_distance = buy ? market - old_sl : old_sl - market;
+         double old_distance =
+            buy ? market - old_sl : old_sl - market;
 
-         if(old_distance <= freeze * point)
+         double old_tolerance = HD_PriceTolerance(
+            market, old_sl, point
+         );
+
+         if(old_distance <= freeze_distance + old_tolerance)
          {
             if(g_audit.Active() && g_audit.Gate("SL_FREEZE_BLOCK", ticket))
             {
