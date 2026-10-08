@@ -2,6 +2,7 @@
 #define HEDGEDRIFT_TRADE_ENGINE_MQH
 
 #include "RuntimeState.mqh"
+#include "Persistence.mqh"
 
 class CHDTradeEngine
 {
@@ -192,15 +193,55 @@ private:
          {
             Print("[HedgeDrift][ERROR] Hard SL distance invalid. ",
                   "Order rejected; SL will not be removed or widened.");
+
+            if(g_audit.Active())
+            {
+               g_audit.Record("ORDER_REJECT_SL",
+                  "{\"sl\":" + g_audit.D(sl) +
+                  ",\"bid\":" + g_audit.D(tick.bid) +
+                  ",\"ask\":" + g_audit.D(tick.ask) +
+                  ",\"minimum_distance\":" +
+                  g_audit.D(minimum_distance) + "}",
+                  0, 0, 0, "WARN");
+            }
+
             return false;
          }
 
          request.sl = sl;
       }
 
+      if(g_audit.Active())
+      {
+         g_audit.Record("ORDER_REQUEST",
+            "{\"action\":" + g_audit.Q(action) +
+            ",\"type\":" + IntegerToString((int)request.type) +
+            ",\"volume\":" + g_audit.D(request.volume) +
+            ",\"price\":" + g_audit.D(request.price) +
+            ",\"bid\":" + g_audit.D(tick.bid) +
+            ",\"ask\":" + g_audit.D(tick.ask) +
+            ",\"sl\":" + g_audit.D(request.sl) +
+            ",\"tp\":" + g_audit.D(request.tp) +
+            ",\"filling\":" + IntegerToString((int)request.type_filling) + "}",
+            position_ticket);
+      }
+
       ResetLastError();
       bool sent = OrderSend(request, m_result);
       int error = GetLastError();
+
+      if(g_audit.Active())
+      {
+         g_audit.Record("ORDER_RESULT",
+            "{\"sent\":" + g_audit.Bool(sent) +
+            ",\"retcode\":" + IntegerToString((int)m_result.retcode) +
+            ",\"error\":" + IntegerToString(error) +
+            ",\"volume\":" + g_audit.D(m_result.volume) +
+            ",\"price\":" + g_audit.D(m_result.price) +
+            ",\"comment\":" + g_audit.Q(m_result.comment) + "}",
+            position_ticket, m_result.order, m_result.deal,
+            sent ? "INFO" : "ERROR");
+      }
 
       if(!sent)
       {
@@ -552,14 +593,45 @@ public:
       double distance = buy ? market - new_sl : new_sl - market;
 
       if(distance <= 0.0 || distance <= required)
+      {
+         if(g_audit.Active() && g_audit.Gate("SL_DISTANCE_BLOCK", ticket))
+         {
+            g_audit.Record("SL_DISTANCE_BLOCK",
+               "{\"old_sl\":" + g_audit.D(old_sl) +
+               ",\"requested_sl\":" + g_audit.D(new_sl) +
+               ",\"distance\":" + g_audit.D(distance) +
+               ",\"required\":" + g_audit.D(required) + "}",
+               ticket, 0, 0, "INFO");
+         }
+
          return false;
+      }
+
+      if(g_audit.Active())
+         g_audit.ClearGate("SL_DISTANCE_BLOCK", ticket);
 
       if(old_sl > 0.0 && freeze > 0)
       {
          double old_distance = buy ? market - old_sl : old_sl - market;
+
          if(old_distance <= freeze * point)
+         {
+            if(g_audit.Active() && g_audit.Gate("SL_FREEZE_BLOCK", ticket))
+            {
+               g_audit.Record("SL_FREEZE_BLOCK",
+                  "{\"old_sl\":" + g_audit.D(old_sl) +
+                  ",\"requested_sl\":" + g_audit.D(new_sl) +
+                  ",\"old_distance\":" + g_audit.D(old_distance) +
+                  ",\"freeze_distance\":" + g_audit.D(freeze * point) + "}",
+                  ticket);
+            }
+
             return false;
+         }
       }
+
+      if(g_audit.Active())
+         g_audit.ClearGate("SL_FREEZE_BLOCK", ticket);
 
       MqlTradeRequest request;
       MqlTradeResult result;
@@ -581,6 +653,20 @@ public:
          sent &&
          (result.retcode == TRADE_RETCODE_DONE ||
           result.retcode == TRADE_RETCODE_NO_CHANGES);
+
+      if(g_audit.Active())
+      {
+         g_audit.Record("SL_MODIFY",
+            "{\"old_sl\":" + g_audit.D(old_sl) +
+            ",\"requested_sl\":" + g_audit.D(new_sl) +
+            ",\"tp_retained\":" + g_audit.D(tp) +
+            ",\"bid\":" + g_audit.D(tick.bid) +
+            ",\"ask\":" + g_audit.D(tick.ask) +
+            ",\"be_type\":" + IntegerToString((int)g_hd.be_type) +
+            ",\"success\":" + g_audit.Bool(success) +
+            ",\"retcode\":" + IntegerToString((int)result.retcode) + "}",
+            ticket, 0, 0, success ? "INFO" : "ERROR");
+      }
 
       Print("[HedgeDrift][", success ? "INFO" : "ERROR", "] ",
             "Modify SL ticket=", ticket,

@@ -1197,7 +1197,103 @@ Update after compile/test:
 
 ---
 
-## 18. Next Work / AI Resume Instructions
+### 17.2 Lean Audit Log v1
+
+Code baseline:
+
+- Source baseline: 03999bc1c9dd42a97cc3959acbd66e662b40fcbb
+- Audit build tag: 03999bc+LeanAudit-v1
+- Tag นี้หมายถึง baseline + patch ไม่ใช่ Git hash ของ code ใหม่
+- Compile: [ ]
+- Runtime / Audit ON-OFF comparison: [ ]
+- New commit: ยังไม่ระบุ
+
+Input:
+
+InpEnableAuditLog=false
+
+Scope:
+
+- Logger อยู่ใน Persistence.mqh ไม่เพิ่มโมดูลที่9
+- Audit files แยกจาก state.json
+- ไม่มี authority เปลี่ยน Trade/Risk/Accounting/Strategy
+- Audit failure ไม่ทำให้ EA Init failed
+- ไม่เปลี่ยน Persistence guards เดิม
+- Log hooks enqueueข้อมูลในหน่วยความจำ
+- Timerเดิม pumpไฟล์เป็นชุด
+- ไม่ Log ทุกtick/ทุกPeak/ทุกTimerRefresh
+- Request/Result/Dealแต่ละรายการไม่ยุบ
+- Repeated guard ยุบและมี SUMMARY count
+- KI-001 ยังไม่แก้ Auditบันทึกค่าResetจริง
+
+Output:
+
+MQL5\Files\HedgeDrift\Audit\<identity>\<run-id>\
+- config.json
+- events.csv
+
+CSV columns:
+
+run_id, seq, server_time, mono_us, event, level,
+program, symbol, magic, cycle, mode, position_ticket,
+order_id, deal_id, repeat_count, details_json
+
+Identity:
+Account + Server hash + Symbol hash + Magic
+
+Runtime flag order:
+auto_lot, hard_cut_loss, hedge_trigger_lock, cut_loss_relock,
+auto_new_cycle, cycle_timeout, auto_be, rr_target,
+session_filter, session1, session2, session3
+
+Limits:
+
+- Queue64
+- Guard cache8
+- Pumpประมาณ5วินาที
+- สูงสุด16rowsต่อnormal pump
+- ตรวจbudget2msระหว่างrows ไม่รับประกันเวลาของFileI/O
+- eventsประมาณ10MB
+- detailsไม่เกิน2048characters
+- Overflowมีdropped count / AUDIT_DATA_LOSS
+- File failure/limitปิดAuditเฉพาะส่วน
+- No RUN_END หรือ data loss = หลักฐานไม่สมบูรณ์
+- ปิดฉับพลันอาจสูญเสียท้ายbuffer
+- Auditไม่ใช่transaction journalที่รับประกันcrash durability
+- config.jsonเก็บInputs ไม่ทราบชื่อ.setที่ผู้ใช้กดLoad
+- RUN_READY/PANEL_STATEแสดงRuntimeจริงหลังRestore/สวิตช์
+- นักวิเคราะห์ต้องใช้CSV+SET+State+Experts/Journalเมื่อจำเป็น
+
+Main events:
+
+RUN_START, RUN_READY, RUNTIME_STATE, RUN_STOP_STATE, RUN_END
+STATE_LOADED, STATE_LOAD_FAILED, STATE_SAVE_FAILED
+STATE_STORAGE_RECOVERED
+ORDER_REQUEST, ORDER_RESULT, ORDER_REJECT_SL, SL_MODIFY
+SL_DISTANCE_BLOCK, SL_FREEZE_BLOCK
+DEAL_ACCOUNTED, RISK_LOCKED, RR_TRIGGER
+TRAIL_TRIGGER, TRAIL_PROFIT_BLOCK
+RH_TIMER_START, RH_INTENT, RH_CANCEL
+TIMEOUT_TRIGGER, LOCK_TRIGGER, LOCK_SESSION_BLOCK
+PANEL_ACTION, PANEL_STATE, PANEL_RESULT, MANUAL_BASKET_REJECT
+AUDIT_DATA_LOSS, *_SUMMARY
+
+Checklist:
+
+| ID | Status | Action | Expected |
+|---|---|---|---|
+| AUD-01 | [ ] | Audit OFF | ไม่มีRun filesใหม่และไม่สร้างAuditข้อความในhot paths |
+| AUD-02 | [ ] | Audit ON เริ่มEA | config.jsonและCSVheaderครบ มีRUN_START/RUN_READY |
+| AUD-03 | [ ] | เทียบInputs/Restore | configตรงInputs RuntimeตรงRUN_READY |
+| AUD-04 | [ ] | เปิด/ปิดManual | Request/Result/Dealเชื่อมTicket/Dealได้ |
+| AUD-05 | [ ] | BE/RR/Trailing | บันทึกค่าที่ใช้ตัดสินใจไม่ใช่แค่ข้อความสำเร็จ |
+| AUD-06 | [ ] | Timer/Re-Hedge | เห็นmissing_since/elapsed/timeout/side |
+| AUD-07 | [ ] | Repeated guard | first event+SUMMARY ไม่ทุกtick |
+| AUD-08 | [ ] | Ref/Lock/CloseAll | Action+ผลบัญชี/Runtimeเชื่อมกัน |
+| AUD-09 | [ ] | Auditwritefailed/limit | Auditหยุดเอง Coreไม่ถูกปิดเพราะAudit |
+| AUD-10 | [ ] | AuditON/OFFข้อมูลทดสอบเดียวกัน | Logicไม่เปลี่ยน Overheadยอมรับได้ |
+| AUD-11 | [ ] | ปิดปกติ | มีRUN_ENDและlost/max_io_us |
+| AUD-12 | [ ] | ปิดฉับพลัน | ยอมรับท้ายLogหาย ไม่อ้างPASSจากหลักฐานขาด ยอมรับท้ายLogหาย ไม่อ้างPASSจากหลักฐานขาด
 
 ### Immediate next action
 

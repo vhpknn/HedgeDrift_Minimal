@@ -71,6 +71,9 @@ input string InpSession2Time        = "10:00-14:00"; // ช่วงที่ 2 
 input bool   InpEnableSession3      = true;          // เปิดช่วงเวลาเทรด Lock ช่วงที่ 3
 input string InpSession3Time        = "21:00-24:00"; // ช่วงที่ 3 เวลา Server รองรับสิ้นสุด 24:00
 
+input group "บันทึกหลักฐาน / Lean Audit"
+input bool InpEnableAuditLog = false; // บันทึกเหตุการณ์สำคัญ ไม่ควบคุมการเทรด
+
 input group "บันทึกและกู้สถานะ / Persistence"
 input bool InpEnablePersistence = true;       // บันทึกและกู้ State ที่เก็บไว้แล้ว
 input bool InpPersistenceInTester = false;    // อนุญาต Persistence ใน Tester (ปกติปิด)

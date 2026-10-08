@@ -296,6 +296,15 @@ public:
 
       m_ready = true;
 
+      if(g_audit.Active())
+      {
+         g_audit.Record("RISK_LOCKED",
+            "{\"initial_risk\":" + g_audit.D(m_initial_risk) +
+            ",\"target\":" + g_audit.D(TargetMoney()) +
+            ",\"rr_enabled\":" + g_audit.Bool(g_hd.rr_target) +
+            ",\"items\":" + IntegerToString(ArraySize(m_items)) + "}");
+      }
+
       Print("[HedgeDrift][INFO] Basket risk locked. InitialRisk=",
             DoubleToString(m_initial_risk, 2),
             " Target=", DoubleToString(TargetMoney(), 2),
@@ -534,8 +543,60 @@ public:
          if(ticket == 0 || !OwnedSelected())
             continue;
 
-         if(PositionGetDouble(POSITION_PROFIT) <= 0.0)
+         double position_profit = PositionGetDouble(POSITION_PROFIT);
+
+         if(position_profit <= 0.0)
+         {
+            if(g_audit.Active())
+            {
+               ulong guard_id =
+                  (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+
+               ENUM_POSITION_TYPE guard_side =
+                  (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+               bool threshold_reached = false;
+
+               for(int j = 0; j < ArraySize(m_items); j++)
+               {
+                  if(m_items[j].identifier != guard_id ||
+                     !m_items[j].peak_ready)
+                     continue;
+
+                  double guard_reversal =
+                     guard_side == POSITION_TYPE_BUY
+                     ? m_items[j].best_price - tick.bid
+                     : tick.ask - m_items[j].best_price;
+
+                  threshold_reached = guard_reversal >= distance;
+
+                  if(threshold_reached &&
+                     g_audit.Gate("TRAIL_PROFIT_BLOCK", ticket))
+                  {
+                     g_audit.Record("TRAIL_PROFIT_BLOCK",
+                        "{\"profit\":" + g_audit.D(position_profit) +
+                        ",\"peak\":" + g_audit.D(m_items[j].best_price) +
+                        ",\"bid\":" + g_audit.D(tick.bid) +
+                        ",\"ask\":" + g_audit.D(tick.ask) +
+                        ",\"reversal_points\":" +
+                        g_audit.D(guard_reversal / point) +
+                        ",\"step_points\":" +
+                        IntegerToString(InpTrailingStepPoints) + "}",
+                        ticket);
+                  }
+
+                  break;
+               }
+
+               if(!threshold_reached)
+                  g_audit.ClearGate("TRAIL_PROFIT_BLOCK", ticket);
+            }
+
             continue;
+         }
+
+         if(g_audit.Active())
+            g_audit.ClearGate("TRAIL_PROFIT_BLOCK", ticket);
 
          ulong identifier =
             (ulong)PositionGetInteger(POSITION_IDENTIFIER);
@@ -560,6 +621,22 @@ public:
             {
                m_items[j].trail_pending = true;
                m_peak_dirty = true;
+
+               if(g_audit.Active())
+               {
+                  g_audit.Record("TRAIL_TRIGGER",
+                     "{\"identifier\":" +
+                     g_audit.U(m_items[j].identifier) +
+                     ",\"side\":" + IntegerToString((int)side) +
+                     ",\"peak\":" + g_audit.D(m_items[j].best_price) +
+                     ",\"bid\":" + g_audit.D(tick.bid) +
+                     ",\"ask\":" + g_audit.D(tick.ask) +
+                     ",\"profit\":" + g_audit.D(position_profit) +
+                     ",\"reversal_points\":" + g_audit.D(reversal / point) +
+                     ",\"step_points\":" +
+                     IntegerToString(InpTrailingStepPoints) + "}",
+                     ticket);
+               }
 
                Print("[HedgeDrift][INFO] Trailing TP triggered. Ticket=",
                      ticket, " ReversalPoints=",
@@ -607,6 +684,14 @@ public:
       {
          if(!m_closing)
          {
+            if(g_audit.Active())
+            {
+               g_audit.Record("RR_TRIGGER",
+                  "{\"or\":" + g_audit.D(accounting.Floating()) +
+                  ",\"initial_risk\":" + g_audit.D(m_initial_risk) +
+                  ",\"target\":" + g_audit.D(TargetMoney()) + "}");
+            }
+
             Print("[HedgeDrift][INFO] Basket RR reached. OR=",
                   DoubleToString(accounting.Floating(), 2),
                   " Target=", DoubleToString(TargetMoney(), 2));

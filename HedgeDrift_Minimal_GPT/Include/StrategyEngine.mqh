@@ -168,11 +168,23 @@ public:
 
    void StopReHedge()
    {
+      bool had_state =
+         m_rh_armed || m_buy_wait || m_sell_wait || m_rh_intent;
+
       m_rh_armed = false;
       m_buy_wait = false;
       m_sell_wait = false;
       m_rh_intent = false;
       m_rh_intent_since = 0;
+
+      if(g_audit.Active() && had_state)
+      {
+         g_audit.Record("RH_CANCEL",
+            "{\"armed\":false,\"buy_wait\":false,\"sell_wait\":false,"
+            "\"intent\":false,\"intent_since\":0,"
+            "\"buy_since\":" + g_audit.U((ulong)m_buy_since) +
+            ",\"sell_since\":" + g_audit.U((ulong)m_sell_since) + "}");
+      }
    }
 
    void ObserveHedgeClose(const ulong deal, CHDTradeEngine &trade)
@@ -213,6 +225,15 @@ public:
       {
          m_sell_wait = true;
          m_sell_since = closed;
+      }
+
+      if(g_audit.Active())
+      {
+         g_audit.Record("RH_TIMER_START",
+            "{\"side\":" + IntegerToString((int)missing) +
+            ",\"since\":" + g_audit.U((ulong)closed) +
+            ",\"timeout_seconds\":" + IntegerToString(InpTimeoutSeconds) + "}",
+            0, 0, deal);
       }
 
       Print("[HedgeDrift][INFO] Missing-side timer: ",
@@ -263,6 +284,20 @@ public:
       m_rh_intent = true;
       m_rh_side = side;
       m_rh_intent_since = TimeCurrent();
+
+      if(g_audit.Active())
+      {
+         datetime since =
+            side == POSITION_TYPE_BUY ? m_buy_since : m_sell_since;
+
+         g_audit.Record("RH_INTENT",
+            "{\"side\":" + IntegerToString((int)side) +
+            ",\"missing_since\":" + g_audit.U((ulong)since) +
+            ",\"elapsed_seconds\":" +
+            StringFormat("%I64d", (long)(TimeCurrent() - since)) +
+            ",\"timeout_seconds\":" + IntegerToString(InpTimeoutSeconds) +
+            ",\"intent_since\":" + g_audit.U((ulong)m_rh_intent_since) + "}");
+      }
    }
 
    bool HasReHedgeIntent()
@@ -431,6 +466,16 @@ public:
          direction = DIR_HEDGE;
          m_spent = true;
 
+         if(g_audit.Active())
+         {
+            g_audit.Record("TIMEOUT_TRIGGER",
+               "{\"wait_since\":" + g_audit.U((ulong)m_wait_since) +
+               ",\"elapsed_seconds\":" +
+               StringFormat("%I64d", (long)(TimeCurrent() - m_wait_since)) +
+               ",\"timeout_seconds\":" + IntegerToString(InpTimeoutSeconds) +
+               ",\"positions\":0}");
+         }
+
          Print("[HedgeDrift][INFO] Empty-basket timeout reached. ",
                "Opening Hedge.");
 
@@ -460,6 +505,7 @@ public:
       double lower = g_hd.lock_price - distance;
       double upper = g_hd.lock_price + distance;
 
+      double previous_price = m_previous;
       bool cross_buy = m_previous > lower && price <= lower;
       bool cross_sell = m_previous < upper && price >= upper;
 
@@ -467,7 +513,25 @@ public:
       m_previous = price;
 
       if(!SessionAllowed())
+      {
+         if(g_audit.Active() && (cross_buy || cross_sell) &&
+            g_audit.Gate("LOCK_SESSION_BLOCK"))
+         {
+            g_audit.Record("LOCK_SESSION_BLOCK",
+               "{\"previous\":" + g_audit.D(previous_price) +
+               ",\"mid\":" + g_audit.D(price) +
+               ",\"lock\":" + g_audit.D(g_hd.lock_price) +
+               ",\"lower\":" + g_audit.D(lower) +
+               ",\"upper\":" + g_audit.D(upper) +
+               ",\"cross_buy\":" + g_audit.Bool(cross_buy) +
+               ",\"cross_sell\":" + g_audit.Bool(cross_sell) + "}");
+         }
+
          return false;
+      }
+
+      if(g_audit.Active())
+         g_audit.ClearGate("LOCK_SESSION_BLOCK");
 
       bool allowed_buy =
          g_hd.direction == DIR_BUY_ONLY ||
@@ -492,6 +556,18 @@ public:
       else
       {
          return false;
+      }
+
+      if(g_audit.Active())
+      {
+         g_audit.Record("LOCK_TRIGGER",
+            "{\"previous\":" + g_audit.D(previous_price) +
+            ",\"mid\":" + g_audit.D(price) +
+            ",\"lock\":" + g_audit.D(g_hd.lock_price) +
+            ",\"lower\":" + g_audit.D(lower) +
+            ",\"upper\":" + g_audit.D(upper) +
+            ",\"direction\":" + IntegerToString((int)direction) +
+            ",\"session_allowed\":true}");
       }
 
       // One request per crossing; failed orders are not spam-retried.

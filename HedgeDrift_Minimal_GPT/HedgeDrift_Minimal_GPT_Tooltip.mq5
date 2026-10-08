@@ -29,6 +29,68 @@ void HD_UpdateDisplay()
    g_panel.Update(g_accounting);
 }
 
+void HD_AuditRuntime(const string event = "RUNTIME_STATE",
+                     const bool force = false)
+{
+   if(!g_audit.Active())
+      return;
+
+   static string previous_key = "";
+
+   int buys = g_trade.CountSide(POSITION_TYPE_BUY);
+   int sells = g_trade.CountSide(POSITION_TYPE_SELL);
+   int pending = g_trade.PendingCount();
+
+   string flags =
+      IntegerToString((int)g_hd.auto_lot) + "," +
+      IntegerToString((int)g_hd.hard_cut_loss) + "," +
+      IntegerToString((int)g_hd.hedge_trigger_lock) + "," +
+      IntegerToString((int)g_hd.cut_loss_relock) + "," +
+      IntegerToString((int)g_hd.auto_new_cycle) + "," +
+      IntegerToString((int)g_hd.cycle_timeout) + "," +
+      IntegerToString((int)g_hd.auto_be) + "," +
+      IntegerToString((int)g_hd.rr_target) + "," +
+      IntegerToString((int)g_hd.session_filter) + "," +
+      IntegerToString((int)g_hd.session1) + "," +
+      IntegerToString((int)g_hd.session2) + "," +
+      IntegerToString((int)g_hd.session3);
+
+   string key =
+      IntegerToString((int)g_hd.cycle) + "|" +
+      IntegerToString((int)g_hd.strategy) + "|" +
+      IntegerToString((int)g_hd.direction) + "|" +
+      IntegerToString((int)g_hd.be_type) + "|" +
+      flags + "|" +
+      IntegerToString(buys) + "|" +
+      IntegerToString(sells) + "|" +
+      IntegerToString(pending) + "|" +
+      IntegerToString((int)g_recovery_ok) + "|" +
+      IntegerToString((int)g_storage_ok) + "|" +
+      DoubleToString(g_hd.lock_price, _Digits);
+
+   if(!force && key == previous_key)
+      return;
+
+   previous_key = key;
+
+   g_audit.Record(event,
+      "{\"direction\":" + IntegerToString((int)g_hd.direction) +
+      ",\"be_type\":" + IntegerToString((int)g_hd.be_type) +
+      ",\"runtime_flags\":" + g_audit.Q(flags) +
+      ",\"buy_count\":" + IntegerToString(buys) +
+      ",\"sell_count\":" + IntegerToString(sells) +
+      ",\"pending_count\":" + IntegerToString(pending) +
+      ",\"lock\":" + g_audit.D(g_hd.lock_price) +
+      ",\"eq\":" + g_audit.D(g_accounting.Balance()) +
+      ",\"or\":" + g_audit.D(g_accounting.Floating()) +
+      ",\"tt\":" + g_audit.D(g_accounting.Equity()) +
+      ",\"initial_risk\":" + g_audit.D(g_risk.InitialRisk()) +
+      ",\"target\":" + g_audit.D(g_risk.TargetMoney()) +
+      ",\"rehedge_active\":" + g_audit.Bool(g_strategy.ReHedgeActive()) +
+      ",\"recovery_ok\":" + g_audit.Bool(g_recovery_ok) +
+      ",\"storage_ok\":" + g_audit.Bool(g_storage_ok) + "}");
+}
+
 bool HD_SaveState()
 {
    if(!g_initialized || !g_recovery_ok)
@@ -50,12 +112,21 @@ bool HD_SaveState()
 
    if(!success && g_storage_ok)
    {
+      if(g_audit.Active())
+         g_audit.Record("STATE_SAVE_FAILED", "{}",
+                        0, 0, 0, "ERROR");
+
       Print("[HedgeDrift][ERROR] State save failed. ",
             "New entries blocked; existing risk management remains active.");
    }
 
    if(success && !g_storage_ok)
+   {
       Print("[HedgeDrift][INFO] State storage recovered.");
+
+      if(g_audit.Active())
+         g_audit.Record("STATE_STORAGE_RECOVERED");
+   }
 
    g_storage_ok = success;
 
@@ -404,6 +475,9 @@ int OnInit()
    g_risk.Init();
    g_strategy.Init();
 
+   // Audit failure does not determine EA initialization.
+   g_audit.Init();
+
    if(!g_trade.Init(_Symbol, InpMagicNumber))
       return INIT_FAILED;
 
@@ -543,6 +617,7 @@ int OnInit()
    }
 
    HD_UpdateDisplay();
+   HD_AuditRuntime("RUN_READY", true);
    return INIT_SUCCEEDED;
 }
 
@@ -555,6 +630,11 @@ void OnDeinit(const int reason)
       HD_ReconcileDeals(true);
       HD_SaveState();
    }
+
+   if(g_audit.Active())
+      HD_AuditRuntime("RUN_STOP_STATE", true);
+
+   g_audit.Stop(reason);
 
    g_initialized = false;
    g_state.Close();
@@ -577,6 +657,9 @@ void OnTimer()
    HD_ReconcileDeals(false);
    HD_SaveState();
    HD_UpdateDisplay();
+
+   HD_AuditRuntime();
+   g_audit.Pump();
 }
 
 void OnTradeTransaction(const MqlTradeTransaction &trans,
@@ -616,6 +699,12 @@ void OnChartEvent(const int id,
       // Refresh header immediately after minimizing/restoring.
       HD_UpdateDisplay();
       return;
+   }
+
+   if(g_audit.Active())
+   {
+      g_audit.Record("PANEL_ACTION",
+         "{\"action\":" + g_audit.Q(EnumToString(action)) + "}");
    }
 
    if(action >= HD_ACTION_MODE)
@@ -696,6 +785,7 @@ void OnChartEvent(const int id,
 
       HD_SaveState();
       HD_UpdateDisplay();
+      HD_AuditRuntime("PANEL_STATE", true);
       return;
    }
 
@@ -742,6 +832,16 @@ void OnChartEvent(const int id,
       if(g_trade.Count() > 0)
       {
          Print("[HedgeDrift][WARN] Open rejected: basket already active.");
+
+         if(g_audit.Active())
+         {
+            g_audit.Record("MANUAL_BASKET_REJECT",
+               "{\"buy_count\":" +
+               IntegerToString(g_trade.CountSide(POSITION_TYPE_BUY)) +
+               ",\"sell_count\":" +
+               IntegerToString(g_trade.CountSide(POSITION_TYPE_SELL)) + "}",
+               0, 0, 0, "WARN");
+         }
       }
       else
       {
@@ -759,4 +859,5 @@ void OnChartEvent(const int id,
    HD_ReconcileDeals(true);
    HD_SaveState();
    HD_UpdateDisplay();
+   HD_AuditRuntime("PANEL_RESULT", true);
 }

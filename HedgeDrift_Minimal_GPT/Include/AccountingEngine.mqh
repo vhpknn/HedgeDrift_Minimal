@@ -234,6 +234,24 @@ public:
       m_realized += net;
       RefreshFloating();
 
+      if(g_audit.Active())
+      {
+         g_audit.Record("DEAL_ACCOUNTED",
+            "{\"position_identifier\":" + g_audit.U(position_id) +
+            ",\"deal_magic\":" + g_audit.U(magic) +
+            ",\"deal_type\":" + IntegerToString((int)type) +
+            ",\"entry\":" + IntegerToString((int)entry) +
+            ",\"reason\":" +
+            IntegerToString((int)HistoryDealGetInteger(ticket, DEAL_REASON)) +
+            ",\"deal_time_msc\":" +
+            StringFormat("%I64d", HistoryDealGetInteger(ticket, DEAL_TIME_MSC)) +
+            ",\"net\":" + g_audit.D(net) +
+            ",\"eq\":" + g_audit.D(Balance()) +
+            ",\"or\":" + g_audit.D(Floating()) +
+            ",\"tt\":" + g_audit.D(Equity()) + "}",
+            0, 0, ticket);
+      }
+
       Print("[HedgeDrift][INFO] Deal=", ticket,
             " Net=", DoubleToString(net, 2),
             " EQ=", DoubleToString(Balance(), 2),
