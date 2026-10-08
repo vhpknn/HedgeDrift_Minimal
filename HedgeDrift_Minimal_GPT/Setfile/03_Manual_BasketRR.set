@@ -1,0 +1,50 @@
+; HedgeDrift Minimal - Master Integration Test
+; Profile: 03 Manual Basket RR
+; Source baseline: ad7b2cf
+; Demo testing only
+
+InpEnableAutoLot=false
+InpBaseCapital=50.0
+InpStartLot=0.01
+InpStepCapital=50.0
+InpStepLot=0.01
+InpRefillAmount=10.0
+
+InpEnableHardCutLoss=true
+InpCutLossPoints=1000
+
+InpStrategyMode=2
+InpTradeDirection=3
+InpEnableHedgeTriggerLock=false
+InpLockDistancePoints=1000
+InpEnableCutLossReLock=false
+
+InpEnableAutoNewCycle=false
+InpEnableCycleTimeout=false
+InpTimeoutSeconds=300
+
+InpEnableAutoBE=false
+InpBETriggerPoints=1000
+InpBELockPercent=20.0
+InpBEType=0
+
+InpEnableRRTarget=true
+InpRRTargetPercent=100.0
+
+InpEnableTrailingTP=false
+InpTrailingStepPoints=500
+InpEnableAutoReHedge=false
+
+InpEnableSessionFilter=false
+InpEnableSession1=true
+InpSession1Time=01:30-05:00
+InpEnableSession2=true
+InpSession2Time=10:00-14:00
+InpEnableSession3=true
+InpSession3Time=21:00-24:00
+
+InpEnableAuditLog=true
+InpEnablePersistence=true
+InpPersistenceInTester=false
+
+InpMagicNumber=998903
