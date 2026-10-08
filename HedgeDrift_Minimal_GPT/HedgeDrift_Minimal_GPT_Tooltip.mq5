@@ -170,11 +170,16 @@ bool HD_ReconcileDeals(const bool force)
 
       double close_price = 0.0;
 
-      if(g_hd.strategy == MODE_LOCK_PRICE &&
+      if(!g_risk.Closing() &&
+         g_hd.strategy == MODE_LOCK_PRICE &&
          g_hd.cut_loss_relock &&
          g_risk.HardCutPrice(tickets[i], close_price))
       {
-         g_strategy.Relock(close_price);
+         g_strategy.Relock(
+            close_price,
+            HistoryDealGetInteger(tickets[i], DEAL_TIME_MSC),
+            tickets[i]
+         );
       }
    }
 
@@ -209,9 +214,12 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
       return false;
    }
 
-   if(g_trade.Count() > 0 || g_trade.PendingCount() > 0)
+   if(g_trade.Count() > 0 ||
+      g_trade.PendingCount() > 0 ||
+      g_strategy.HasReHedgeIntent())
    {
-      Print("[HedgeDrift][WARN] Open rejected: basket/order already active.");
+      Print("[HedgeDrift][WARN] Open rejected: ",
+            "basket/order/request already active.");
       return false;
    }
 
@@ -272,6 +280,56 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
    return opened && count > 0;
 }
 
+enum ENUM_HD_RH_RESOLUTION
+{
+   HD_RH_RESOLVED = 0,
+   HD_RH_WAITING,
+   HD_RH_UNKNOWN,
+   HD_RH_PARTIAL,
+   HD_RH_CONFLICT,
+   HD_RH_CANCEL_PENDING
+};
+
+ENUM_HD_RH_RESOLUTION g_rh_resolution = HD_RH_RESOLVED;
+
+bool HD_RHHistoryFailure(const ENUM_HD_RH_RESOLUTION state)
+{
+   g_rh_resolution = state;
+   return false;
+}
+
+bool HD_RHDeferred(const ENUM_HD_RH_RESOLUTION state)
+{
+   g_rh_resolution = state;
+   return true;
+}
+
+void HD_AuditReHedgeResolution()
+{
+   if(!g_audit.Active())
+      return;
+
+   static string previous = "";
+
+   string key =
+      IntegerToString((int)g_rh_resolution) + "|" +
+      g_audit.U((ulong)g_strategy.ReHedgeIntentTime()) + "|" +
+      g_audit.U(g_strategy.ReHedgeOrder()) + "|" +
+      g_audit.U(g_strategy.ReHedgeDeal());
+
+   if(key == previous)
+      return;
+
+   previous = key;
+
+   g_audit.Record("RH_RESOLUTION",
+      "{\"state\":" + g_audit.Q(EnumToString(g_rh_resolution)) +
+      ",\"intent\":" + g_audit.Bool(g_strategy.HasReHedgeIntent()) +
+      ",\"cancelled\":" + g_audit.Bool(g_strategy.ReHedgeCancelled()) +
+      ",\"order\":" + g_audit.U(g_strategy.ReHedgeOrder()) +
+      ",\"deal\":" + g_audit.U(g_strategy.ReHedgeDeal()) + "}");
+}
+
 struct HD_ReHedgeHistory
 {
    ulong identifier;
@@ -284,6 +342,7 @@ struct HD_ReHedgeHistory
 
 bool HD_ReadReHedgeHistory(HD_ReHedgeHistory &evidence)
 {
+   g_rh_resolution = HD_RH_CONFLICT;
    ZeroMemory(evidence);
 
    ENUM_POSITION_TYPE side = g_strategy.ReHedgeIntentSide();
@@ -294,9 +353,14 @@ bool HD_ReadReHedgeHistory(HD_ReHedgeHistory &evidence)
    double requested = g_strategy.ReHedgeRequestedVolume();
    double step = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
-   if(!MathIsValidNumber(requested) || requested <= 0.0 ||
-      !MathIsValidNumber(step) || step <= 0.0)
+   if(!MathIsValidNumber(requested) || requested < 0.0)
       return false;
+
+   if(requested == 0.0)
+      return HD_RHHistoryFailure(HD_RH_UNKNOWN);
+
+   if(!MathIsValidNumber(step) || step <= 0.0)
+      return HD_RHHistoryFailure(HD_RH_WAITING);
 
    ulong order = g_strategy.ReHedgeOrder();
    ulong receipt_deal = g_strategy.ReHedgeDeal();
@@ -310,7 +374,7 @@ bool HD_ReadReHedgeHistory(HD_ReHedgeHistory &evidence)
    if(receipt_deal != 0)
    {
       if(!HistoryDealSelect(receipt_deal))
-         return false;
+         return HD_RHHistoryFailure(HD_RH_WAITING);
 
       if(HistoryDealGetString(receipt_deal, DEAL_SYMBOL) != _Symbol ||
          (ulong)HistoryDealGetInteger(receipt_deal, DEAL_MAGIC) !=
@@ -330,16 +394,33 @@ bool HD_ReadReHedgeHistory(HD_ReHedgeHistory &evidence)
       order = deal_order;
    }
 
-   if(order == 0 || !HistoryOrderSelect(order))
-      return false;
+   if(order == 0)
+      return HD_RHHistoryFailure(HD_RH_UNKNOWN);
+
+   if(!HistoryOrderSelect(order))
+      return HD_RHHistoryFailure(HD_RH_WAITING);
 
    if(HistoryOrderGetString(order, ORDER_SYMBOL) != _Symbol ||
       (ulong)HistoryOrderGetInteger(order, ORDER_MAGIC) != InpMagicNumber ||
       (ENUM_ORDER_TYPE)HistoryOrderGetInteger(order, ORDER_TYPE) !=
-         order_type ||
-      (ENUM_ORDER_STATE)HistoryOrderGetInteger(order, ORDER_STATE) !=
-         ORDER_STATE_FILLED)
+         order_type)
       return false;
+
+   ENUM_ORDER_STATE order_state =
+      (ENUM_ORDER_STATE)HistoryOrderGetInteger(order, ORDER_STATE);
+
+   if(order_state != ORDER_STATE_FILLED)
+   {
+      if(order_state == ORDER_STATE_PARTIAL)
+         return HD_RHHistoryFailure(HD_RH_PARTIAL);
+
+      if(order_state == ORDER_STATE_CANCELED ||
+         order_state == ORDER_STATE_EXPIRED ||
+         order_state == ORDER_STATE_REJECTED)
+         return HD_RHHistoryFailure(HD_RH_UNKNOWN);
+
+      return HD_RHHistoryFailure(HD_RH_WAITING);
+   }
 
    datetime setup =
       (datetime)HistoryOrderGetInteger(order, ORDER_TIME_SETUP);
@@ -359,7 +440,7 @@ bool HD_ReadReHedgeHistory(HD_ReHedgeHistory &evidence)
       return false;
 
    if(!HistorySelectByPosition(evidence.identifier))
-      return false;
+      return HD_RHHistoryFailure(HD_RH_WAITING);
 
    bool receipt_seen = receipt_deal == 0;
    long last_close_msc = 0;
@@ -421,10 +502,12 @@ bool HD_ReadReHedgeHistory(HD_ReHedgeHistory &evidence)
          return false;
    }
 
-   if(!receipt_seen ||
-      !MathIsValidNumber(evidence.opened_volume) ||
+   if(!MathIsValidNumber(evidence.opened_volume) ||
       !MathIsValidNumber(evidence.closed_volume))
       return false;
+
+   if(!receipt_seen)
+      return HD_RHHistoryFailure(HD_RH_WAITING);
 
    evidence.volume_tolerance = MathMax(
       step * 1e-7,
@@ -432,24 +515,106 @@ bool HD_ReadReHedgeHistory(HD_ReHedgeHistory &evidence)
          MathMax(requested, evidence.opened_volume)
    );
 
-   if(MathAbs(evidence.opened_volume - requested) >
-         evidence.volume_tolerance ||
-      evidence.closed_volume >
-         evidence.opened_volume + evidence.volume_tolerance)
+   if(evidence.opened_volume >
+         requested + evidence.volume_tolerance)
       return false;
+
+   if(evidence.opened_volume <
+         requested - evidence.volume_tolerance)
+   {
+      ENUM_HD_RH_RESOLUTION state =
+         g_strategy.ReHedgeRetcode() == TRADE_RETCODE_DONE_PARTIAL
+         ? HD_RH_PARTIAL : HD_RH_WAITING;
+
+      return HD_RHHistoryFailure(state);
+   }
+
+   if(evidence.closed_volume >
+         evidence.opened_volume + evidence.volume_tolerance)
+      return HD_RHHistoryFailure(HD_RH_WAITING);
 
    evidence.closed_time = (datetime)(last_close_msc / 1000);
 
    return true;
 }
 
-bool HD_ResolveReHedgeIntent()
+bool HD_RestoreReplacementRelock(const HD_ReHedgeHistory &evidence)
+{
+   if(g_risk.Closing() || evidence.original_sl <= 0.0)
+      return true;
+
+   double tick_size =
+      SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+
+   if(!MathIsValidNumber(tick_size) || tick_size <= 0.0)
+      return false;
+
+   if(!HistorySelectByPosition(evidence.identifier))
+      return false;
+
+   int total = HistoryDealsTotal();
+   ulong tickets[];
+
+   if(total <= 0 || ArrayResize(tickets, total) != total)
+      return false;
+
+   for(int i = 0; i < total; i++)
+   {
+      tickets[i] = HistoryDealGetTicket(i);
+
+      if(tickets[i] == 0)
+         return false;
+   }
+
+   for(int i = 0; i < total; i++)
+   {
+      ulong deal = tickets[i];
+
+      if(!HistoryDealSelect(deal))
+         return false;
+
+      ENUM_DEAL_ENTRY entry =
+         (ENUM_DEAL_ENTRY)HistoryDealGetInteger(deal, DEAL_ENTRY);
+
+      if(entry != DEAL_ENTRY_OUT && entry != DEAL_ENTRY_OUT_BY)
+         continue;
+
+      if(HistoryDealGetString(deal, DEAL_SYMBOL) != _Symbol ||
+         (ulong)HistoryDealGetInteger(deal, DEAL_POSITION_ID) !=
+            evidence.identifier)
+         return false;
+
+      if((ENUM_DEAL_REASON)HistoryDealGetInteger(deal, DEAL_REASON) !=
+         DEAL_REASON_SL)
+         continue;
+
+      double deal_sl = HistoryDealGetDouble(deal, DEAL_SL);
+
+      if(!MathIsValidNumber(deal_sl))
+         return false;
+
+      if(MathAbs(deal_sl - evidence.original_sl) > tick_size * 0.5)
+         continue;
+
+      double price = HistoryDealGetDouble(deal, DEAL_PRICE);
+      long time_msc = HistoryDealGetInteger(deal, DEAL_TIME_MSC);
+
+      if(!MathIsValidNumber(price) || price <= 0.0 || time_msc <= 0)
+         return false;
+
+      g_strategy.Relock(price, time_msc, deal);
+   }
+
+   return true;
+}
+
+bool HD_ResolveReHedgeIntentCore()
 {
    if(!g_strategy.HasReHedgeIntent())
       return true;
 
    if(g_trade.PendingCount() > 0)
-      return true;
+      return HD_RHDeferred(HD_RH_WAITING);
 
    ENUM_POSITION_TYPE side = g_strategy.ReHedgeIntentSide();
    int count = g_trade.CountSide(side);
@@ -470,6 +635,9 @@ bool HD_ResolveReHedgeIntent()
             g_audit.U((ulong)g_strategy.ReHedgeIntentTime()) + "}");
       }
 
+      if(g_strategy.ReHedgeCancelled())
+         return g_strategy.FinishCancelledReHedgeIntent();
+
       g_strategy.FinishReHedgeIntent(false);
       return true;
    }
@@ -478,7 +646,7 @@ bool HD_ResolveReHedgeIntent()
 
    if(!HD_ReadReHedgeHistory(evidence))
    {
-      if(g_recovery_ok)
+      if(g_recovery_ok && g_rh_resolution == HD_RH_CONFLICT)
       {
          Print("[HedgeDrift][ERROR] Re-Hedge history evidence incomplete. ",
                "Partial, unknown or conflicting execution remains blocked.");
@@ -490,7 +658,7 @@ bool HD_ResolveReHedgeIntent()
                g_strategy.ReHedgeDeal(), "ERROR");
       }
 
-      return false;
+      return g_rh_resolution != HD_RH_CONFLICT;
    }
 
    double remaining =
@@ -500,16 +668,24 @@ bool HD_ResolveReHedgeIntent()
    {
       if(MathAbs(remaining) > evidence.volume_tolerance ||
          evidence.closed_time <= 0)
-         return false;
+         return HD_RHDeferred(HD_RH_WAITING);
 
-      // Do not replay a historical Re-Lock out of chronological order.
+      if(g_strategy.ReHedgeCancelled())
+      {
+         if(!HD_ReconcileDeals(true))
+            return false;
+
+         if(!g_strategy.FinishCancelledReHedgeIntent())
+            return false;
+
+         HD_SetCycle(HD_IDLE);
+         return true;
+      }
+
       if(g_hd.strategy == MODE_LOCK_PRICE && g_hd.cut_loss_relock)
       {
-         if(g_recovery_ok)
-            Print("[HedgeDrift][ERROR] Closed replacement requires ",
-                  "chronological HardCut Re-Lock recovery.");
-
-         return false;
+         if(!HD_RestoreReplacementRelock(evidence))
+            return HD_RHDeferred(HD_RH_WAITING);
       }
 
       if(!HD_ReconcileDeals(true))
@@ -537,7 +713,7 @@ bool HD_ResolveReHedgeIntent()
    ulong ticket = g_trade.TicketForSide(side);
 
    if(ticket == 0 || !PositionSelectByTicket(ticket))
-      return false;
+      return HD_RHDeferred(HD_RH_WAITING);
 
    ulong live_identifier =
       (ulong)PositionGetInteger(POSITION_IDENTIFIER);
@@ -549,17 +725,21 @@ bool HD_ResolveReHedgeIntent()
 
    if(live_identifier != evidence.identifier ||
       live_side != side ||
-      remaining <= evidence.volume_tolerance ||
-      !MathIsValidNumber(live_volume) ||
-      MathAbs(live_volume - remaining) > evidence.volume_tolerance)
+      !MathIsValidNumber(live_volume))
    {
-      Print("[HedgeDrift][ERROR] Live replacement does not match ",
-            "the saved request and history evidence.");
+      Print("[HedgeDrift][ERROR] Live replacement identity conflict.");
       return false;
    }
 
+   if(remaining <= evidence.volume_tolerance ||
+      MathAbs(live_volume - remaining) > evidence.volume_tolerance)
+      return HD_RHDeferred(HD_RH_WAITING);
+
    if(!g_risk.RegisterReplacement(ticket, evidence.original_sl))
       return false;
+
+   if(g_strategy.ReHedgeCancelled())
+      return HD_RHDeferred(HD_RH_CANCEL_PENDING);
 
    g_strategy.FinishReHedgeIntent(true);
    HD_SetCycle(HD_ACTIVE);
@@ -569,6 +749,20 @@ bool HD_ResolveReHedgeIntent()
          " Ticket=", ticket);
 
    return true;
+}
+
+bool HD_ResolveReHedgeIntent()
+{
+   g_rh_resolution = HD_RH_CONFLICT;
+
+   bool not_fatal = HD_ResolveReHedgeIntentCore();
+
+   if(not_fatal && !g_strategy.HasReHedgeIntent())
+      g_rh_resolution = HD_RH_RESOLVED;
+
+   HD_AuditReHedgeResolution();
+
+   return not_fatal;
 }
 
 bool HD_RunTrailingHelper()
@@ -736,6 +930,7 @@ void HD_RunPhase3()
    if(!risk_action &&
       !trailing_action &&
       !g_strategy.ReHedgeActive() &&
+      !g_strategy.HasReHedgeIntent() &&
       g_recovery_ok &&
       g_storage_ok &&
       g_trade.PendingCount() == 0)
@@ -798,9 +993,16 @@ int OnInit()
       if(!g_state.Good())
          return INIT_FAILED;
 
-      if(g_trade.Count() > 0 && !settings_match)
+      bool saved_request =
+         g_state.Has("rh_intent") && g_state.B("rh_intent");
+
+      if(!g_state.Good())
+         return INIT_FAILED;
+
+      if((g_trade.Count() > 0 || saved_request) && !settings_match)
       {
-         Print("[HedgeDrift][ERROR] Inputs changed while a basket exists. ",
+         Print("[HedgeDrift][ERROR] Inputs changed while ",
+               "a basket or saved request exists. ",
                "Restore the previous .set first.");
          return INIT_PARAMETERS_INCORRECT;
       }
@@ -948,7 +1150,12 @@ void OnTimer()
    if(!g_initialized)
       return;
 
-   HD_ReconcileDeals(false);
+   if(HD_ReconcileDeals(false))
+   {
+      if(!HD_ResolveReHedgeIntent())
+         g_recovery_ok = false;
+   }
+
    HD_SaveState();
    HD_UpdateDisplay();
 
@@ -1003,7 +1210,10 @@ void OnChartEvent(const int id,
 
    if(action >= HD_ACTION_MODE)
    {
-      bool empty = g_trade.Count() == 0;
+      bool empty =
+         g_trade.Count() == 0 &&
+         g_trade.PendingCount() == 0 &&
+         !g_strategy.HasReHedgeIntent();
 
       if(action == HD_ACTION_MODE)
       {
@@ -1108,14 +1318,14 @@ void OnChartEvent(const int id,
    else if(action == HD_ACTION_CLOSE)
    {
       g_strategy.StopReHedge();
-      HD_SaveState();
+      g_risk.RequestClose();
 
-      if(g_trade.Count() > 0)
-      {
-         g_risk.RequestClose();
+      if(g_trade.Count() > 0 ||
+         g_trade.PendingCount() > 0 ||
+         g_strategy.HasReHedgeIntent())
          HD_SetCycle(HD_CLOSING);
-         HD_SaveState();
-      }
+
+      HD_SaveState();
 
       g_trade.CloseAll();
       HD_ReconcileDeals(true);

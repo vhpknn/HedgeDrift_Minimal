@@ -390,7 +390,7 @@ public:
    bool RegisterReplacement(const ulong ticket,
                             const double original_sl = 0.0)
    {
-      if(!CanReHedge() || !PositionSelectByTicket(ticket) ||
+      if(!m_ready || !PositionSelectByTicket(ticket) ||
          !OwnedSelected())
          return false;
 

@@ -1,0 +1,203 @@
+
+# 📐 HedgeDrift Minimal — Master System Architecture & Development Blueprint (v3.0 Final Master Spec)
+
+## 📌 1. Execution Workflow Rules (กฎการทำงาน)
+1. **Compile-Only Validation per Phase:** ทุกๆ Phase ที่พัฒนานั้น ไอ้จ้อยต้องเขียนโค้ดและส่งมาให้ Compile ผ่าน MetaEditor (0 Errors, 0 Warnings) เท่านั้น **ไม่ต้องหยุดรอให้ผู้ใช้ไปนั่งกด Runtime Test ทีละข้อบนกราฟ!**[cite: 6]
+2. **Phase-by-Phase Progress:** พัฒนาและเชื่อมต่อโครงสร้างต่อได้ทันทีเมื่อผ่าน Compile เพื่อรันยาวไปจนจบ Phase 4 (Persistence & Recovery Engine)[cite: 6]
+3. **Mid-Way Adjustments Allowed:** ผู้ใช้สามารถสั่งปรับ เพิ่ม หรือลด ฟังก์ชันการทำงานระหว่างการพัฒนาได้ตลอดเวลา[cite: 6]
+4. **Final Integration Test Checklist:** เมื่อโค้ดครบทุก Phase (Phase 1 - 4) จะทำการทดสอบระบบรวมทั้งหมดจาก Master Checklist ในรอบเดียว[cite: 6]
+
+---
+
+## 🎛️ 2. Input Parameter Standards & Explicit Toggle Rules (กฎเหล็ก Input 6 กลุ่ม)
+> **CRITICAL RULE:** ทุกฟังก์ชันและทุก Sub-option ต้องมีสวิตช์ `bool` (`true`/`false`) ควบคุมระดับหัวหมวดและซับฟังก์ชันเสมอ **ห้ามใช้ค่า `0`, `-1` หรือข้อความว่าง `""` ในการเปิด-ปิดฟังก์ชันเด็ดขาด!**[cite: 6]
+
+```mql5
+//=== Group 1: Virtual Capital Auto-Lot ===
+input bool     InpEnableAutoLot           = true;          // เปิด/ปิด ระบบคำนวณ Lot อัตโนมัติชาญฉลาด
+input double   InpBaseCapital             = 50.0;          // ทุนตั้งต้นอ้างอิงสำหรับเริ่มคำนวณ ($)
+input double   InpStartLot                = 0.01;          // ขนาด Lot เริ่มต้นสำหรับทุน Base Capital
+input double   InpStepCapital             = 50.0;          // สเต็ปการเพิ่มทุนทุกๆ X ($) เพื่อเพิ่ม Lot
+input double   InpStepLot                 = 0.01;          // ขนาด Lot ที่เพิ่มขึ้นในแต่ละสเต็ปทุน
+input double   InpRefillAmount            = 10.0;          // จำนวนเงินทุนจำลองที่จะเติมเพิ่มเมื่อกดปุ่ม REFILL ($)
+
+//=== Group 2: Hard Risk Control ===
+input bool     InpEnableHardCutLoss       = true;          // เปิด/ปิด การตั้ง SL เด็ดขาดบน Server โบรกเกอร์
+input int      InpCutLossPoints           = 1000;          // ระยะตัดขาดทุน Hard SL (หน่วย: Point/จุด)
+
+//=== Group 3: Core Strategy & Direction Selector ===
+enum ENUM_STRATEGY_MODE {
+   MODE_TIME_SESSION = 0,   // 1. Time Session Mode
+   MODE_LOCK_PRICE   = 1,   // 2. Distance Lock Price Mode
+   MODE_MANUAL_FREE  = 2    // 3. Manual / Free Trade Mode
+};
+input ENUM_STRATEGY_MODE InpStrategyMode  = MODE_LOCK_PRICE; // เลือกกลยุทธ์การเทรดหลัก (MANUAL / TIMEOUT / LOCK)
+
+enum ENUM_TRADE_DIRECTION {
+   DIR_BUY_ONLY  = 0,       // Buy Only
+   DIR_SELL_ONLY = 1,       // Sell Only
+   DIR_BOTH      = 2,       // Both Buy & Sell
+   DIR_HEDGE     = 3        // Hedge
+};
+input ENUM_TRADE_DIRECTION InpTradeDirection = DIR_BOTH;     // เลือกทิศทางออเดอร์ (BOTH / BUY_ONLY / SELL_ONLY)
+
+//--- Sub-Settings: Distance Lock Price System ---
+input bool     InpEnableHedgeTriggerLock  = true;          // เปิด/ปิด การล็อคราคา Trigger เมื่อเปิด Basket
+input int      InpLockDistancePoints      = 1000;          // ระยะทางราคาที่ใช้คำนวณจุด Trigger Lock (Points)
+input bool     InpEnableCutLossReLock     = true;          // เปิด/ปิด การตั้ง Lock Price ใหม่ทันทีเมื่อชน SL
+
+//--- Sub-Settings: Auto Cycle & Timeout ---
+input bool     InpEnableAutoNewCycle      = true;          // เปิด/ปิด การเริ่มรอบ Cycle ใหม่ใหม่อัตโนมัติเมื่อ Basket ว่าง
+input bool     InpEnableCycleTimeout      = true;          // เปิด/ปิด การจับเวลานับถอยหลังหมดเวลา Cycle
+input int      InpTimeoutSeconds          = 300;           // ระยะเวลาจับเวลาถอยหลังของ Cycle (หน่วย: วินาที)
+
+//=== Group 4: Profit Protection & Targets ===
+input bool     InpEnableAutoBE            = true;          // เปิด/ปิด การขยับ SL มาบังทุนอัตโนมัติ (Break Even)
+input int      InpBETriggerPoints         = 1000;          // ระยะกำไรที่ต้องถึงก่อนเริ่มขยับ SL บังทุน (Points)
+input double   InpBELockPercent           = 20.0;          // เปอร์เซ็นต์กำไรที่จะล็อคไว้เมื่อขยับ BE
+
+enum ENUM_BE_TYPE {
+   BE_TYPE_FIXED   = 0,     // 1. Fixed Percent (ล็อกนิ่งไม่เลื่อนตาม)
+   BE_TYPE_DYNAMIC = 1      // 2. Dynamic Trailing Percent (เลื่อนขึ้นตามราคาเมื่อบวกเพิ่มทุก 10 pts)
+};
+input ENUM_BE_TYPE InpBEType              = BE_TYPE_FIXED;  // เลือกประเภท Break Even (FIXED / DYNAMIC)
+
+input bool     InpEnableRRTarget          = true;          // เปิด/ปิด การปิดรวบตึงเมื่อกำไรถึงเป้า Risk Reward
+input double   InpRRTargetPercent         = 100.0;         // เป้าหมายกำไร RR ที่ต้องการปิดรวบ (% ของทุน)
+
+//--- Sub-Settings: Trailing TP (Best Price) ---
+input bool     InpEnableTrailingTP        = false;         // เปิด/ปิด การเลื่อน Trailing Stop ล็อคกำไรตามราคา
+input int      InpTrailingStepPoints      = 500;           // ระยะขยับสเต็ปของ Trailing TP (Points)
+input bool     InpEnableAutoReHedge       = true;          // เปิด/ปิด การเปิดออเดอร์แก้ฝั่งอัตโนมัติเมื่อค้างรวบ
+
+//=== Group 5: Multi-Trading Sessions (สวิตช์ bool แยกอิสระทุก Session) ===
+input bool     InpEnableSessionFilter     = true;          // เปิด/ปิด การกรองช่วงเวลาเทรดตามกรอบเวลา
+input bool     InpEnableSession1          = true;          // เปิด/ปิด การใช้งานช่วงเวลาเทรดที่ 1
+input string   InpSession1Time            = "01:30-05:00"; // กรอบเวลาเทรดที่ 1 (รูปแบบ HH:MM-HH:MM)
+input bool     InpEnableSession2          = true;          // เปิด/ปิด การใช้งานช่วงเวลาเทรดที่ 2
+input string   InpSession2Time            = "10:00-14:00"; // กรอบเวลาเทรดที่ 2 (รูปแบบ HH:MM-HH:MM)
+input bool     InpEnableSession3          = true;          // เปิด/ปิด การใช้งานช่วงเวลาเทรดที่ 3
+input string   InpSession3Time            = "21:00-24:00"; // กรอบเวลาเทรดที่ 3 (รูปแบบ HH:MM-HH:MM)
+
+//=== Group 6: Persistence & Identity ===
+input bool     InpEnablePersistence       = true;          // เปิด/ปิด การบันทึก State ลงไฟล์ JSON กันเน็ตหลุด
+input bool     InpPersistenceInTester     = false;         // เปิด/ปิด การบันทึก State ขณะเทสต์ใน Strategy Tester
+input ulong    InpMagicNumber             = 998874;        // หมายเลขไอดีประจำตัว EA สำหรับจัดการออเดอร์
+input string   InpEAComment               = "HedgeDrift_RR1:2"; // ข้อความอธิบายกลยุทธ์
+
+```
+
+---
+
+## 🎯 3. Core Strategy Architecture (3 Independent Strategy Modes)
+
+ระบบแยก Pipeline การทำงานออกเป็น 3 โหมดอิสระจากกันเด็ดขาด (Decoupled Isolation) ห้ามนำ Filter ของโหมดหนึ่งไปบล็อกการทำงานของอีกโหมดหนึ่ง:
+
+```
+                  ┌───────────────────────────────────────────┐
+                  │           HedgeDrift Core Engine          │
+                  └─────────────────────┬─────────────────────┘
+                                        │
+      ┌─────────────────────────────────┼─────────────────────────────────┐
+      ▼                                 ▼                                 ▼
+┌───────────────────────────┐ ┌───────────────────────────┐ ┌───────────────────────────┐
+│ 1. Manual / Panel Mode    │ │ 2. Timeout Mode           │ │ 3. Lock Crossing Mode     │
+├───────────────────────────┤ ├───────────────────────────┤ ├───────────────────────────┤
+│ • Instant Execution       │ │ • Elapsed Time Trigger    │ │ • Price Action Crossing   │
+│ • Bypass Lock & Session   │ │ • Condition: Pos == 0     │ │ • Session Filter Aware    │
+│ • Manual Order Override   │ │ • Action: Auto HEDGE OPEN │ │ • Strict Level Breakout   │
+└───────────────────────────┘ └───────────────────────────┘ └───────────────────────────┘
+
+```
+
+---
+
+## 🎨 4. UI/UX & Responsive Display Specs
+
+1. **Panel Label Expansion:** ขยายชื่อ Label บน Dashboard จากตัวย่อ `EQ:`, `OR:`, `TT:` เป็นคำเต็ม **`Equity:`**, **`Profit:`**, **`Total:`** ให้ชัดเจน สบายตา
+2. **Button High-Contrast:** ปุ่มสถานะเปิดใช้งาน (`State ON` / พื้นหลังสีเขียว) ให้ปรับตัวหนังสือบนปุ่มเป็น **"สีดำ" (`clrBlack`)**
+
+3. **Master Hover Tooltips (`OBJPROP_TOOLTIP`):** ตั้งค่า Tooltip ข้อความภาษาไทยให้ Object ทุกตัวบน Panel (ทั้งปุ่มและ Label แสดงผล)
+4. **Responsive Dynamic Scaling:** คำนวณ `ChartGetInteger(0, CHART_WIDTH_IN_PIXELS)` เพื่อปรับขนาด Panel, ปุ่ม และ Font Size อัตโนมัติ
+
+
+5. **Minimize Toggle:** ปุ่มพับเก็บ Panel `[_]` ที่มุมบนขวา เพื่อย่อ Panel ให้เหลือขนาดมินิมอล
+
+
+
+---
+
+## 💾 5. Persistence & Recovery Engine (Phase 4 Specs)
+
+1. **Sandbox Path:** `<data folder>\MQL5\Files\HedgeDrift\<account-server-symbol-magic>\state.json`
+
+2. **Atomic Safe Save Protocol:** เขียน Temp File -> Flush/Close -> สำรองไฟล์เดิม -> Replace ไฟล์หลัก
+
+
+3. **Recovery State Mapping:** กู้คืน Capital (EQ), Floating Profit (OR), Initial Risk Money, Lock Price, State Machine (`IDLE`, `ACTIVE`, `CLOSING`), Active Strategy Mode และ Countdown Counter
+
+
+4. **Safety Guards:** หากไฟล์ state.json หายหรือเสียหายระหว่างมีไม้ค้าง ให้เข้าสู่โหมด Safe-Lock บล็อกการเปิดออเดอร์ใหม่
+
+
+
+---
+
+## 🛡️ 6. Pre-Flight Code Verification Protocol (กฎเหล็ก Self-Check ก่อนส่ง Code)
+
+> **CRITICAL MANDATE FOR PRO DEV:** ไอ้จ้อยต้องทำการ Self-Check ตรวจสอบ Logic ในโค้ดของตัวเองให้ผ่านเงื่อนไข 4 ข้อนี้ **100% ก่อนพ่น Source Code ออกมา** เพื่อป้องกันการส่งโค้ดพิการหรือทำงานเพี้ยน:
+
+### 1. Symmetric Logic Self-Check (BUY vs SELL Mirror Logic)
+
+* **Quote Reference Alignment:**
+* BUY Execution & Risk Check อิงกับราคา `Bid`
+* SELL Execution & Risk Check อิงกับราคา `Ask` (ต้องรวมค่า Spread ของโบรกเกอร์) ห้ามใช้ `Bid` คำนวณฝั่ง SELL เด็ดขาด!
+
+
+* **Mirror Operators:**
+* BUY Condition: `CurrentBid >= TriggerPrice` | SELL Condition: `CurrentAsk <= TriggerPrice`
+
+
+* **SL/BE Distance Calculation:**
+* BUY SL/BE: `SL_Price = OpenPrice + Distance` (หรือ `- Distance` สำหรับ Hard SL)
+* SELL SL/BE: `SL_Price = OpenPrice - Distance` (หรือ `+ Distance` สำหรับ Hard SL)
+
+
+* **Unified Core Functions:** ฟังก์ชันจัดการ Auto BE, Hard SL, Trailing TP และ RR Targets ต้องถูกตรวจสอบว่าฝั่ง BUY และ SELL ได้รับ Parameter ทิศทางและคิดระยะ Point ตรงกันสะท้อนกระจกเงา 100%
+
+### 2. Pipeline Isolation Verification
+
+* ตรวจสอบว่าโหมด Manual บน Panel สามารถสั่งงานได้ทันทีโดยไม่โดน Lock Crossing Filter หรือ Session Filter มาบล็อก
+
+
+* ตรวจสอบว่า Timeout Mode ทำงานเฉพาะเมื่อ `Pos == 0` เท่านั้น
+
+
+
+### 3. Input & Persistence Mapping Consistency
+
+* ตรวจสอบว่าตัวแปร `input` ทั้ง 6 กลุ่ม ถูกนำไปใช้งานใน Logic จริง และมี Comment ภาษาไทยท้ายบรรทัดตรงตาม Spec
+
+
+* ตรวจสอบว่าค่าใน `state.json` ถูก Serialize/Deserialize ครบทุก State Machine
+
+
+
+### 4. Zero Warning Compilation
+
+* โค้ดที่ส่งออกมาก่อนถึงมือผู้ใช้ **ต้องผ่านการ Compile บน MetaEditor แบบ 0 Errors, 0 Warnings** เท่านั้น
+
+
+
+---
+
+## 📁 7. Project Handoff Tracking (`HANDOFF.md`)
+
+สร้างไฟล์ `HANDOFF.md` ไว้ที่ Root Directory เพื่อติดตามสถานะงาน และใช้สัญลักษณ์สถานะดังนี้:
+
+* `[*]` = ผ่านการตรวจสอบและทดสอบแล้ว
+* `[-]` = ไม่ผ่านการตรวจสอบ/พบปัญหา (ต้องแก้ไข)
+* `[ ]` = อยู่ระหว่างรอการทดสอบ
+
+---
+

@@ -14,6 +14,8 @@ private:
    bool m_seen_basket;
    bool m_relock_pending;
    datetime m_wait_since;
+   long m_relock_time_msc;
+   ulong m_relock_deal;
 
    bool m_rh_armed;
    bool m_buy_wait;
@@ -68,6 +70,8 @@ public:
       m_seen_basket = false;
       m_relock_pending = false;
       m_wait_since = TimeCurrent();
+      m_relock_time_msc = 0;
+      m_relock_deal = 0;
 
       m_rh_armed = false;
       m_buy_wait = false;
@@ -86,6 +90,10 @@ public:
       state.PutU("strategy_seen", (ulong)m_seen_basket);
       state.PutU("strategy_relock", (ulong)m_relock_pending);
       state.PutU("strategy_wait", (ulong)m_wait_since);
+
+      state.PutU("relock_order_version", 1);
+      state.PutU("relock_time_msc", (ulong)m_relock_time_msc);
+      state.PutU("relock_deal", m_relock_deal);
 
       state.PutU("rh_version", 1);
       state.PutU("rh_armed", (ulong)m_rh_armed);
@@ -111,6 +119,28 @@ public:
       m_seen_basket = state.B("strategy_seen");
       m_relock_pending = state.B("strategy_relock");
       m_wait_since = (datetime)state.U("strategy_wait");
+
+      m_relock_time_msc = 0;
+      m_relock_deal = 0;
+
+      if(state.Has("relock_order_version"))
+      {
+         if(state.I("relock_order_version") != 1)
+            return false;
+
+         ulong stamp = state.U("relock_time_msc");
+         m_relock_deal = state.U("relock_deal");
+
+         if(stamp > (ulong)LONG_MAX ||
+            (stamp == 0 && m_relock_deal != 0) ||
+            (stamp != 0 && m_relock_deal == 0))
+            return false;
+
+         m_relock_time_msc = (long)stamp;
+
+         if(!state.Good())
+            return false;
+      }
 
       m_rh_armed = false;
       m_buy_wait = false;
@@ -233,24 +263,34 @@ public:
 
    void StopReHedge()
    {
-      ClearReHedgeReceipt();
+      bool keep_request = m_rh_intent;
 
+      if(!keep_request)
+         ClearReHedgeReceipt();
+
+      // Report the transition, not every pass while cancellation is pending.
       bool had_state =
-         m_rh_armed || m_buy_wait || m_sell_wait || m_rh_intent;
+         m_rh_armed || m_buy_wait || m_sell_wait;
 
       m_rh_armed = false;
       m_buy_wait = false;
       m_sell_wait = false;
       m_buy_since = 0;
       m_sell_since = 0;
-      m_rh_intent = false;
-      m_rh_intent_since = 0;
+
+      if(!keep_request)
+      {
+         m_rh_intent = false;
+         m_rh_intent_since = 0;
+      }
 
       if(g_audit.Active() && had_state)
       {
          g_audit.Record("RH_CANCEL",
             "{\"armed\":false,\"buy_wait\":false,\"sell_wait\":false,"
-            "\"intent\":false,\"intent_since\":0,"
+            "\"intent\":" + g_audit.Bool(m_rh_intent) +
+            ",\"intent_since\":" +
+            g_audit.U((ulong)m_rh_intent_since) + ","
             "\"buy_since\":" + g_audit.U((ulong)m_buy_since) +
             ",\"sell_since\":" + g_audit.U((ulong)m_sell_since) + "}");
       }
@@ -412,6 +452,32 @@ public:
          deal_ticket == 0;
    }
 
+   bool ReHedgeCancelled()
+   {
+      return m_rh_intent && !m_rh_armed;
+   }
+
+   bool FinishCancelledReHedgeIntent()
+   {
+      if(!ReHedgeCancelled())
+         return false;
+
+      m_rh_intent = false;
+      m_rh_intent_since = 0;
+
+      StopReHedge();
+
+      if(g_audit.Active())
+      {
+         g_audit.Record("RH_CANCEL_SETTLED",
+            "{\"intent\":false,\"armed\":false,"
+            "\"buy_wait\":false,\"sell_wait\":false,"
+            "\"buy_since\":0,\"sell_since\":0}");
+      }
+
+      return true;
+   }
+
    bool ReHedgeNoExecution()
    {
       return m_rh_intent && m_rh_no_execution;
@@ -550,10 +616,24 @@ public:
       m_wait_since = TimeCurrent();
    }
 
-   void Relock(const double price)
+   void Relock(const double price,
+               const long time_msc = 0,
+               const ulong deal = 0)
    {
-      if(price <= 0.0)
+      if(!MathIsValidNumber(price) || price <= 0.0 || time_msc < 0)
          return;
+
+      if(time_msc > 0)
+      {
+         if(deal == 0 ||
+            time_msc < m_relock_time_msc ||
+            (time_msc == m_relock_time_msc &&
+             deal <= m_relock_deal))
+            return;
+
+         m_relock_time_msc = time_msc;
+         m_relock_deal = deal;
+      }
 
       g_hd.lock_price = price;
       m_previous_valid = false;
