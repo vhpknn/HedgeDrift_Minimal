@@ -163,6 +163,62 @@ private:
       }
    }
 
+   void SelectorStyle(const string suffix,
+                      const color background,
+                      const color foreground)
+   {
+      string name = Name(suffix);
+
+      ObjectSetInteger(0, name, OBJPROP_BGCOLOR, background);
+      ObjectSetInteger(0, name, OBJPROP_COLOR, foreground);
+      ObjectSetInteger(0, name, OBJPROP_BORDER_COLOR, background);
+   }
+
+   void UpdateSelectorStyles()
+   {
+      // MODE: color represents the selected strategy.
+      switch(g_hd.strategy)
+      {
+         case MODE_MANUAL_FREE:
+            SelectorStyle("MODE", C'15,118,110', clrWhite);
+            break;
+
+         case MODE_TIMEOUT_HEDGE:
+            SelectorStyle("MODE", C'245,158,11', clrBlack);
+            break;
+
+         case MODE_LOCK_PRICE:
+            SelectorStyle("MODE", C'30,102,245', clrWhite);
+            break;
+      }
+
+      // DIRECTION: same visual meaning as BUY / SELL / HEDGE.
+      switch(g_hd.direction)
+      {
+         case DIR_BUY_ONLY:
+            SelectorStyle("DIRECTION", C'30,102,245', clrWhite);
+            break;
+
+         case DIR_SELL_ONLY:
+            SelectorStyle("DIRECTION", C'190,45,65', clrWhite);
+            break;
+
+         case DIR_BOTH:
+            SelectorStyle("DIRECTION", C'0,110,120', clrWhite);
+            break;
+
+         case DIR_HEDGE:
+            SelectorStyle("DIRECTION", C'136,57,239', clrWhite);
+            break;
+      }
+
+      // BE TYPE: selected type, not the Auto BE ON/OFF switch.
+      if(g_hd.be_type == BE_TYPE_FIXED)
+         SelectorStyle("BETYPE", C'229,200,144', clrBlack);
+      else
+         SelectorStyle("BETYPE", C'137,180,250', clrBlack);
+   }
+
    void StateStyle(const string suffix, const bool enabled)
    {
       string name = Name(suffix);
@@ -501,10 +557,10 @@ public:
                  C'136,57,239', clrWhite)) ok = false;
 
       if(!Button("LOCK", "LOCK PRICE", 24, 236,
-                 C'49,50,68', C'205,214,244')) ok = false;
+                 C'14,116,144', clrWhite)) ok = false;
 
       if(!Button("REFILL", "REFILL", 162, 236,
-                 C'49,50,68', C'205,214,244')) ok = false;
+                 C'22,101,52', clrWhite)) ok = false;
 
       if(!Button("CLOSE", "CLOSE ALL", 300, 236,
                  C'229,200,144', C'17,17,27')) ok = false;
@@ -618,6 +674,7 @@ public:
       StateStyle("SESSION", g_hd.session_filter);
       StateStyle("RELOCK", g_hd.cut_loss_relock);
 
+      UpdateSelectorStyles();
       ApplyTooltips();
       ChartRedraw(0);
    }
