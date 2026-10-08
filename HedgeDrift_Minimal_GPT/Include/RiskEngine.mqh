@@ -10,6 +10,12 @@ struct HD_RiskItem
    ulong identifier;
    double initial_sl;
    bool hard_sl;
+
+   ENUM_POSITION_TYPE side;
+   bool side_known;
+   double best_price;
+   bool peak_ready;
+   bool trail_pending;
 };
 
 class CHDRiskEngine
@@ -20,6 +26,22 @@ private:
    bool m_ready;
    bool m_closing;
    datetime m_last_close_attempt;
+   datetime m_last_trail_attempt;
+   bool m_peak_dirty;
+
+   bool IdentifierLive(const ulong identifier)
+   {
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         if(PositionGetTicket(i) == 0 || !OwnedSelected())
+            continue;
+
+         if((ulong)PositionGetInteger(POSITION_IDENTIFIER) == identifier)
+            return true;
+      }
+
+      return false;
+   }
 
    bool OwnedSelected()
    {
@@ -35,6 +57,8 @@ public:
       m_ready = false;
       m_closing = false;
       m_last_close_attempt = 0;
+      m_last_trail_attempt = 0;
+      m_peak_dirty = false;
    }
 
    void RequestClose()
@@ -54,6 +78,7 @@ public:
       state.PutU("risk_ready", (ulong)m_ready);
       state.PutU("risk_closing", (ulong)m_closing);
       state.PutU("risk_count", (ulong)ArraySize(m_items));
+      state.PutU("trail_version", 1);
 
       for(int i = 0; i < ArraySize(m_items); i++)
       {
@@ -62,6 +87,11 @@ public:
          state.PutU(key + "_id", m_items[i].identifier);
          state.PutD(key + "_sl", m_items[i].initial_sl);
          state.PutU(key + "_hard", (ulong)m_items[i].hard_sl);
+         state.PutU(key + "_side", (ulong)m_items[i].side);
+         state.PutU(key + "_side_known", (ulong)m_items[i].side_known);
+         state.PutD(key + "_peak", m_items[i].best_price);
+         state.PutU(key + "_peak_ready", (ulong)m_items[i].peak_ready);
+         state.PutU(key + "_trail_pending", (ulong)m_items[i].trail_pending);
       }
    }
 
@@ -73,6 +103,16 @@ public:
 
       int count = state.I("risk_count");
       m_last_close_attempt = 0;
+      m_last_trail_attempt = 0;
+      m_peak_dirty = false;
+
+      bool extended = state.Has("trail_version");
+
+      if(state.Has("feature_version") && !extended)
+         return false;
+
+      if(extended && state.I("trail_version") != 1)
+         return false;
 
       if(!state.Good() || m_initial_risk < 0.0 ||
          count > 2 || ArrayResize(m_items, count) != count)
@@ -85,6 +125,30 @@ public:
          m_items[i].identifier = state.U(key + "_id");
          m_items[i].initial_sl = state.D(key + "_sl");
          m_items[i].hard_sl = state.B(key + "_hard");
+
+         m_items[i].side = POSITION_TYPE_BUY;
+         m_items[i].side_known = false;
+         m_items[i].best_price = 0.0;
+         m_items[i].peak_ready = false;
+         m_items[i].trail_pending = false;
+
+         if(extended)
+         {
+            int side = state.I(key + "_side");
+
+            if(side > 1)
+               return false;
+
+            m_items[i].side = (ENUM_POSITION_TYPE)side;
+            m_items[i].side_known = state.B(key + "_side_known");
+            m_items[i].best_price = state.D(key + "_peak");
+            m_items[i].peak_ready = state.B(key + "_peak_ready");
+            m_items[i].trail_pending = state.B(key + "_trail_pending");
+
+            if(m_items[i].best_price < 0.0 ||
+               (m_items[i].peak_ready && m_items[i].best_price <= 0.0))
+               return false;
+         }
 
          if(m_items[i].identifier == 0 ||
             m_items[i].initial_sl < 0.0)
@@ -216,6 +280,11 @@ public:
 
          m_items[index].initial_sl = sl;
          m_items[index].hard_sl = g_hd.hard_cut_loss && sl > 0.0;
+         m_items[index].side = type;
+         m_items[index].side_known = true;
+         m_items[index].best_price = 0.0;
+         m_items[index].peak_ready = false;
+         m_items[index].trail_pending = false;
          count++;
       }
 
@@ -279,6 +348,244 @@ public:
       }
 
       return false;
+   }
+
+   bool CanReHedge()
+   {
+      return m_ready && !m_closing;
+   }
+
+   bool PeakDirty()
+   {
+      return m_peak_dirty;
+   }
+
+   void MarkSaved()
+   {
+      m_peak_dirty = false;
+   }
+
+   bool RegisterReplacement(const ulong ticket)
+   {
+      if(!CanReHedge() || !PositionSelectByTicket(ticket) ||
+         !OwnedSelected())
+         return false;
+
+      ENUM_POSITION_TYPE side =
+         (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+      ulong identifier =
+         (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+
+      double sl = PositionGetDouble(POSITION_SL);
+
+      if(g_hd.hard_cut_loss && sl <= 0.0)
+         return false;
+
+      for(int i = 0; i < ArraySize(m_items); i++)
+         if(m_items[i].identifier == identifier)
+            return true;
+
+      int slot = -1;
+
+      for(int i = 0; i < ArraySize(m_items); i++)
+      {
+         if(m_items[i].side_known &&
+            m_items[i].side == side &&
+            !IdentifierLive(m_items[i].identifier))
+         {
+            slot = i;
+            break;
+         }
+      }
+
+      if(slot < 0)
+      {
+         for(int i = 0; i < ArraySize(m_items); i++)
+         {
+            if(!IdentifierLive(m_items[i].identifier))
+            {
+               slot = i;
+               break;
+            }
+         }
+      }
+
+      if(slot < 0)
+      {
+         int count = ArraySize(m_items);
+
+         if(count >= 2 ||
+            ArrayResize(m_items, count + 1) != count + 1)
+            return false;
+
+         slot = count;
+      }
+
+      m_items[slot].identifier = identifier;
+      m_items[slot].initial_sl = sl;
+      m_items[slot].hard_sl = g_hd.hard_cut_loss && sl > 0.0;
+      m_items[slot].side = side;
+      m_items[slot].side_known = true;
+      m_items[slot].best_price = 0.0;
+      m_items[slot].peak_ready = false;
+      m_items[slot].trail_pending = false;
+
+      m_peak_dirty = true;
+
+      Print("[HedgeDrift][INFO] Replacement registered. Ticket=", ticket,
+            " InitialRisk unchanged=", DoubleToString(m_initial_risk, 2));
+
+      return true;
+   }
+
+   void UpdateTrailingPeaks()
+   {
+      if(m_closing)
+         return;
+
+      MqlTick tick;
+
+      if(!SymbolInfoTick(_Symbol, tick) ||
+         tick.bid <= 0.0 || tick.ask <= 0.0)
+         return;
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         if(PositionGetTicket(i) == 0 || !OwnedSelected())
+            continue;
+
+         ulong identifier =
+            (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+
+         ENUM_POSITION_TYPE side =
+            (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+         double price = side == POSITION_TYPE_BUY ? tick.bid : tick.ask;
+
+         for(int j = 0; j < ArraySize(m_items); j++)
+         {
+            if(m_items[j].identifier != identifier)
+               continue;
+
+            if(!m_items[j].side_known)
+            {
+               m_items[j].side = side;
+               m_items[j].side_known = true;
+               m_peak_dirty = true;
+            }
+
+            if(!InpEnableTrailingTP)
+            {
+               if(m_items[j].trail_pending)
+               {
+                  m_items[j].trail_pending = false;
+                  m_peak_dirty = true;
+               }
+
+               break;
+            }
+
+            if(!m_items[j].peak_ready)
+            {
+               m_items[j].best_price = price;
+               m_items[j].peak_ready = true;
+               m_peak_dirty = true;
+
+               Print("[HedgeDrift][INFO] Trailing peak initialized. ID=",
+                     identifier,
+                     " Price=", DoubleToString(price, _Digits));
+            }
+            else if((side == POSITION_TYPE_BUY &&
+                     price > m_items[j].best_price) ||
+                    (side == POSITION_TYPE_SELL &&
+                     price < m_items[j].best_price))
+            {
+               m_items[j].best_price = price;
+               m_peak_dirty = true;
+            }
+
+            break;
+         }
+      }
+   }
+
+   bool PrepareTrailing(ulong &tickets[])
+   {
+      ArrayResize(tickets, 0);
+
+      if(!InpEnableTrailingTP || m_closing)
+         return false;
+
+      double point = SymbolInfoDouble(_Symbol, SYMBOL_POINT);
+      if(point <= 0.0)
+         return false;
+
+      MqlTick tick;
+      if(!SymbolInfoTick(_Symbol, tick))
+         return false;
+
+      double distance = InpTrailingStepPoints * point;
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+
+         if(ticket == 0 || !OwnedSelected())
+            continue;
+
+         if(PositionGetDouble(POSITION_PROFIT) <= 0.0)
+            continue;
+
+         ulong identifier =
+            (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+
+         ENUM_POSITION_TYPE side =
+            (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+
+         for(int j = 0; j < ArraySize(m_items); j++)
+         {
+            if(m_items[j].identifier != identifier ||
+               !m_items[j].peak_ready)
+               continue;
+
+            double reversal = side == POSITION_TYPE_BUY
+               ? m_items[j].best_price - tick.bid
+               : tick.ask - m_items[j].best_price;
+
+            if(!m_items[j].trail_pending && reversal < distance)
+               break;
+
+            if(!m_items[j].trail_pending)
+            {
+               m_items[j].trail_pending = true;
+               m_peak_dirty = true;
+
+               Print("[HedgeDrift][INFO] Trailing TP triggered. Ticket=",
+                     ticket, " ReversalPoints=",
+                     DoubleToString(reversal / point, 1));
+            }
+
+            int count = ArraySize(tickets);
+
+            if(ArrayResize(tickets, count + 1) != count + 1)
+               return false;
+
+            tickets[count] = ticket;
+            break;
+         }
+      }
+
+      return ArraySize(tickets) > 0;
+   }
+
+   bool TrailAttemptAllowed()
+   {
+      if(m_last_trail_attempt == TimeCurrent())
+         return false;
+
+      m_last_trail_attempt = TimeCurrent();
+      return true;
    }
 
    bool Tick(CHDTradeEngine &trade, CHDAccounting &accounting)

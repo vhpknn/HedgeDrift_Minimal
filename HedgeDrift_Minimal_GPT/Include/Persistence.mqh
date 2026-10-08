@@ -206,7 +206,7 @@ public:
       return false;
    }
 
-   string Settings()
+   string Settings(const bool include_features = true)
    {
       string value =
          DoubleToString(InpBaseCapital, 16) + "|" +
@@ -244,12 +244,34 @@ public:
       for(int i = 0; i < ArraySize(flags); i++)
          value += "|" + IntegerToString(flags[i]);
 
+      if(include_features)
+      {
+         value += "|" + IntegerToString((int)InpEnableTrailingTP);
+         value += "|" + IntegerToString(InpTrailingStepPoints);
+         value += "|" + IntegerToString((int)InpEnableAutoReHedge);
+      }
+
       return Encode(value);
+   }
+
+   bool Has(const string key)
+   {
+      string marker = "\"" + key + "\":\"";
+      return StringFind(m_read, marker) >= 0;
    }
 
    bool SettingsMatch()
    {
-      return Get("settings") == Settings() && m_ok;
+      string saved = Get("settings");
+
+      if(!m_ok)
+         return false;
+
+      if(saved == Settings())
+         return true;
+
+      // Snapshot from Phase 4 before these feature inputs existed.
+      return !Has("feature_version") && saved == Settings(false);
    }
 
    void Begin()
@@ -259,6 +281,7 @@ public:
       Put("schema", "1");
       Put("identity", m_identity);
       Put("settings", Settings());
+      PutU("feature_version", 1);
    }
 
    void Put(const string key, const string value)

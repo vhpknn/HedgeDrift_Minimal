@@ -58,6 +58,10 @@ bool HD_SaveState()
       Print("[HedgeDrift][INFO] State storage recovered.");
 
    g_storage_ok = success;
+
+   if(success)
+      g_risk.MarkSaved();
+
    return success;
 }
 
@@ -65,6 +69,9 @@ bool HD_ReconcileDeals(const bool force)
 {
    if(!force && g_last_replay == TimeCurrent())
       return g_accounting.Healthy();
+
+   if(g_risk.Closing())
+      g_strategy.StopReHedge();
 
    ulong tickets[];
 
@@ -88,6 +95,8 @@ bool HD_ReconcileDeals(const bool force)
          continue;
       }
 
+      g_strategy.ObserveHedgeClose(tickets[i], g_trade);
+
       double close_price = 0.0;
 
       if(g_hd.strategy == MODE_LOCK_PRICE &&
@@ -101,7 +110,8 @@ bool HD_ReconcileDeals(const bool force)
    // Finish the basket only after the replay batch is processed.
    if(g_trade.Count() == 0 && g_trade.PendingCount() == 0)
    {
-      g_strategy.BasketClosed();
+      if(!g_strategy.ReHedgeActive())
+         g_strategy.BasketClosed();
 
       if(g_hd.cycle == HD_ACTIVE ||
          g_hd.cycle == HD_CLOSING ||
@@ -141,6 +151,7 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
       return false;
    }
 
+   g_strategy.StopReHedge();
    g_risk.Init();
    HD_SetCycle(HD_OPENING);
 
@@ -170,6 +181,13 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
       }
 
       HD_SetCycle(HD_ACTIVE);
+
+      if(opened && direction == DIR_HEDGE &&
+         g_trade.CountSide(POSITION_TYPE_BUY) == 1 &&
+         g_trade.CountSide(POSITION_TYPE_SELL) == 1)
+      {
+         g_strategy.ArmReHedge();
+      }
    }
    else
    {
@@ -183,12 +201,165 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
    return opened && count > 0;
 }
 
+bool HD_ResolveReHedgeIntent()
+{
+   if(!g_strategy.HasReHedgeIntent())
+      return true;
+
+   if(g_trade.PendingCount() > 0)
+      return true;
+
+   ENUM_POSITION_TYPE side = g_strategy.ReHedgeIntentSide();
+   int count = g_trade.CountSide(side);
+
+   if(count > 1)
+      return false;
+
+   if(count == 0)
+   {
+      g_strategy.FinishReHedgeIntent(false);
+      return true;
+   }
+
+   ulong ticket = g_trade.TicketForSide(side);
+
+   if(ticket == 0 || !PositionSelectByTicket(ticket))
+      return false;
+
+   datetime opened =
+      (datetime)PositionGetInteger(POSITION_TIME);
+
+   if(opened < g_strategy.ReHedgeIntentTime() - 1)
+   {
+      Print("[HedgeDrift][ERROR] Re-Hedge intent does not match position time.");
+      return false;
+   }
+
+   if(!g_risk.RegisterReplacement(ticket))
+      return false;
+
+   g_strategy.FinishReHedgeIntent(true);
+   HD_SetCycle(HD_ACTIVE);
+
+   Print("[HedgeDrift][INFO] Re-Hedge filled: ",
+         side == POSITION_TYPE_BUY ? "BUY" : "SELL",
+         " Ticket=", ticket);
+
+   return true;
+}
+
+bool HD_RunTrailingHelper()
+{
+   g_risk.UpdateTrailingPeaks();
+
+   ulong tickets[];
+   bool candidates = g_risk.PrepareTrailing(tickets);
+
+   if(g_risk.PeakDirty() || candidates)
+   {
+      // Save peak and close intent before sending any trailing close.
+      if(!HD_SaveState())
+         return false;
+   }
+
+   if(!candidates ||
+      !g_recovery_ok ||
+      !g_storage_ok ||
+      g_trade.PendingCount() > 0 ||
+      !g_risk.TrailAttemptAllowed())
+      return false;
+
+   bool requested = false;
+
+   for(int i = 0; i < ArraySize(tickets); i++)
+   {
+      if(g_trade.CloseTrailingPosition(tickets[i]))
+         requested = true;
+   }
+
+   HD_ReconcileDeals(true);
+   HD_SaveState();
+
+   return requested;
+}
+
+bool HD_RunReHedgeHelper()
+{
+   if(!g_strategy.ReHedgeActive() ||
+      !g_risk.CanReHedge() ||
+      !g_recovery_ok ||
+      !g_storage_ok)
+      return false;
+
+   if(g_strategy.HasReHedgeIntent())
+   {
+      if(!HD_ResolveReHedgeIntent())
+      {
+         g_recovery_ok = false;
+         Print("[HedgeDrift][ERROR] Re-Hedge intent unresolved. ",
+               "New entries blocked.");
+      }
+
+      HD_SaveState();
+      return false;
+   }
+
+   ENUM_POSITION_TYPE side = POSITION_TYPE_BUY;
+
+   if(!g_strategy.ReHedgeSignal(g_trade, side))
+      return false;
+
+   if(!HD_ReconcileDeals(true) ||
+      g_trade.CountSide(side) > 0 ||
+      g_trade.PendingCount() > 0)
+      return false;
+
+   g_strategy.BeginReHedgeIntent(side);
+
+   if(!HD_SaveState())
+      return false;
+
+   g_trade.OpenMissingSide(side, InpStartLot);
+
+   if(!HD_ResolveReHedgeIntent())
+   {
+      g_recovery_ok = false;
+      Print("[HedgeDrift][ERROR] Replacement could not be registered. ",
+            "Inspect terminal positions before continuing.");
+   }
+
+   HD_ReconcileDeals(true);
+   HD_SaveState();
+   return true;
+}
+
 void HD_RunPhase3()
 {
    HD_ReconcileDeals(false);
 
+   if(!HD_ResolveReHedgeIntent())
+   {
+      g_recovery_ok = false;
+      Print("[HedgeDrift][ERROR] Replacement intent mismatch.");
+      return;
+   }
+
    // Existing risk still runs even when new entries are blocked.
    bool risk_action = g_risk.Tick(g_trade, g_accounting);
+
+   if(g_risk.Closing())
+   {
+      g_strategy.StopReHedge();
+      HD_SaveState();
+   }
+
+   bool trailing_action = false;
+
+   if(!risk_action)
+      trailing_action = HD_RunTrailingHelper();
+
+   if(!risk_action && !trailing_action)
+      HD_RunReHedgeHelper();
 
    if(g_trade.Count() == 0)
    {
@@ -198,6 +369,8 @@ void HD_RunPhase3()
 
    // Never start a new basket in the same pass as an RR close attempt.
    if(!risk_action &&
+      !trailing_action &&
+      !g_strategy.ReHedgeActive() &&
       g_recovery_ok &&
       g_storage_ok &&
       g_trade.PendingCount() == 0)
@@ -277,6 +450,12 @@ int OnInit()
       if(!HD_ReconcileDeals(true))
          return INIT_FAILED;
 
+      if(!HD_ResolveReHedgeIntent())
+      {
+         Print("[HedgeDrift][ERROR] Saved Re-Hedge intent mismatch.");
+         return INIT_FAILED;
+      }
+
       if(!g_risk.CoversLiveBasket())
       {
          Print("[HedgeDrift][ERROR] Live basket does not match saved risk. ",
@@ -296,6 +475,17 @@ int OnInit()
       }
       else
       {
+         if(!g_state.Has("feature_version") &&
+            InpEnableAutoReHedge &&
+            g_trade.CountSide(POSITION_TYPE_BUY) == 1 &&
+            g_trade.CountSide(POSITION_TYPE_SELL) == 1)
+         {
+            g_strategy.ArmReHedge();
+
+            Print("[HedgeDrift][INFO] Legacy full hedge adopted. ",
+                  "No historical missing-side timer was invented.");
+         }
+
          Print("[HedgeDrift][INFO] Runtime settings restored from snapshot.");
       }
    }
@@ -439,6 +629,7 @@ void OnChartEvent(const int id,
             g_hd.strategy =
                (ENUM_STRATEGY_MODE)(((int)g_hd.strategy + 1) % 3);
 
+            g_strategy.StopReHedge();
             g_strategy.ResetLock();
             HD_SetCycle(HD_IDLE);
          }
@@ -532,6 +723,9 @@ void OnChartEvent(const int id,
    }
    else if(action == HD_ACTION_CLOSE)
    {
+      g_strategy.StopReHedge();
+      HD_SaveState();
+
       if(g_trade.Count() > 0)
       {
          g_risk.RequestClose();

@@ -58,6 +58,10 @@ input ENUM_BE_TYPE InpBEType          = BE_TYPE_FIXED;
 input bool   InpEnableRRTarget  = true;
 input double InpRRTargetPercent = 100.0;
 
+input bool InpEnableTrailingTP   = false;
+input int  InpTrailingStepPoints = 500;
+input bool InpEnableAutoReHedge  = true;
+
 input group "Sessions"
 input bool   InpEnableSessionFilter = true;
 input bool   InpEnableSession1      = true;
@@ -173,6 +177,15 @@ bool HD_ValidateConfig()
    if(InpEnableRRTarget &&
       (InpRRTargetPercent <= 0.0 || InpCutLossPoints <= 0))
       return HD_ConfigError("RR requires positive target and risk distance.");
+
+   if(InpEnableTrailingTP && InpTrailingStepPoints <= 0)
+      return HD_ConfigError("TrailingStepPoints must be positive.");
+
+   if(InpEnableAutoReHedge && InpTimeoutSeconds <= 0)
+      return HD_ConfigError("AutoReHedge requires positive TimeoutSeconds.");
+
+   if(InpEnableTrailingTP && !InpEnablePersistence)
+      return HD_ConfigError("Trailing TP requires Persistence enabled.");
 
    if(InpMagicNumber == 0)
       return HD_ConfigError("MagicNumber must not be zero.");

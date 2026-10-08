@@ -302,6 +302,103 @@ public:
       return true;
    }
 
+   int CountSide(const ENUM_POSITION_TYPE side)
+   {
+      int count = 0;
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         if(PositionGetTicket(i) == 0)
+            continue;
+
+         if(PositionGetString(POSITION_SYMBOL) != m_symbol ||
+            (ulong)PositionGetInteger(POSITION_MAGIC) != m_magic)
+            continue;
+
+         if((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) == side)
+            count++;
+      }
+
+      return count;
+   }
+
+   ulong TicketForSide(const ENUM_POSITION_TYPE side)
+   {
+      ulong found = 0;
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         ulong ticket = PositionGetTicket(i);
+         if(ticket == 0)
+            continue;
+
+         if(PositionGetString(POSITION_SYMBOL) != m_symbol ||
+            (ulong)PositionGetInteger(POSITION_MAGIC) != m_magic ||
+            (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != side)
+            continue;
+
+         if(found != 0)
+            return 0;
+
+         found = ticket;
+      }
+
+      return found;
+   }
+
+   bool CloseTrailingPosition(const ulong ticket)
+   {
+      if(m_busy || !TradingAllowed() || PendingCount() > 0)
+         return false;
+
+      if(!PositionSelectByTicket(ticket))
+         return false;
+
+      if(PositionGetString(POSITION_SYMBOL) != m_symbol ||
+         (ulong)PositionGetInteger(POSITION_MAGIC) != m_magic)
+         return false;
+
+      // Recheck immediately before requesting the close.
+      if(PositionGetDouble(POSITION_PROFIT) <= 0.0)
+         return false;
+
+      m_busy = true;
+      bool result = CloseTicket(ticket);
+      m_busy = false;
+
+      return result;
+   }
+
+   bool OpenMissingSide(const ENUM_POSITION_TYPE side,
+                        const double requested_lot)
+   {
+      if(m_busy || !TradingAllowed() || PendingCount() > 0)
+         return false;
+
+      if(side != POSITION_TYPE_BUY && side != POSITION_TYPE_SELL)
+         return false;
+
+      if(CountSide(POSITION_TYPE_BUY) > 1 ||
+         CountSide(POSITION_TYPE_SELL) > 1)
+      {
+         Print("[HedgeDrift][ERROR] Re-Hedge blocked: duplicate side.");
+         return false;
+      }
+
+      if(CountSide(side) != 0)
+         return false;
+
+      double lot = NormalizeLot(requested_lot);
+      if(lot <= 0.0)
+         return false;
+
+      m_busy = true;
+      bool result = SendLeg(side == POSITION_TYPE_BUY, lot);
+      m_busy = false;
+
+      return result;
+   }
+
    int PendingCount()
    {
       int count = 0;
