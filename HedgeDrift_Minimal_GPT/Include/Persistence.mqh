@@ -3,7 +3,7 @@
 
 #include "RuntimeState.mqh"
 
-#define HD_AUDIT_BUILD "03999bc+LeanAudit-v1"
+#define HD_AUDIT_BUILD "8f4e0bb+AuditNames-v1"
 
 struct HD_AuditGate
 {
@@ -40,6 +40,37 @@ private:
    ulong m_max_io_us;
 
    HD_AuditGate m_gates[8];
+
+   string AuditStem()
+   {
+      string safe_symbol = _Symbol;
+
+      string invalid[] =
+      {
+         "\\", "/", ":", "*", "?", "\"", "<", ">", "|"
+      };
+
+      for(int i = 0; i < ArraySize(invalid); i++)
+         StringReplace(safe_symbol, invalid[i], "_");
+
+      for(int i = 0; i < StringLen(safe_symbol); i++)
+      {
+         if(StringGetCharacter(safe_symbol, i) < 32)
+            StringSetCharacter(safe_symbol, i, (ushort)95);
+      }
+
+      if(StringLen(safe_symbol) > 48)
+         safe_symbol = StringSubstr(safe_symbol, 0, 48);
+
+      if(safe_symbol == "")
+         safe_symbol = "SYMBOL";
+
+      // Preserve distinction if a symbol had to be sanitized/shortened.
+      if(safe_symbol != _Symbol)
+         safe_symbol += "_" + IntegerToString((long)Hash(_Symbol));
+
+      return safe_symbol + "_" + U(InpMagicNumber);
+   }
 
    ulong ClockMS()
    {
@@ -136,7 +167,12 @@ private:
 
       AddConfig(body, "audit_build", HD_AUDIT_BUILD);
       AddConfig(body, "source_baseline",
-         "03999bc1c9dd42a97cc3959acbd66e662b40fcbb");
+         "8f4e0bbd1859d3fea7cb75434517fc573081c36b");
+      AddConfig(body, "audit_implementation_baseline",
+         "66ee79c1315de133611f93ee6ac51f5a0d726671");
+      AddConfig(body, "audit_folder", m_folder);
+      AddConfig(body, "config_file", AuditStem() + "_config.json");
+      AddConfig(body, "events_file", AuditStem() + "_events.csv");
       AddConfig(body, "run_id", m_run);
       AddConfig(body, "program", m_program);
       AddConfig(body, "symbol", _Symbol);
@@ -266,35 +302,41 @@ public:
       m_run += "_" + U(GetTickCount64()) + "_" +
                StringFormat("%I64d", ChartID());
 
-      string identity =
+      string stem = AuditStem();
+
+      string account_identity =
          StringFormat("%I64d", AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
-         IntegerToString((long)Hash(AccountInfoString(ACCOUNT_SERVER))) + "_" +
-         IntegerToString((long)Hash(_Symbol)) + "_" + U(InpMagicNumber);
+         IntegerToString((long)Hash(AccountInfoString(ACCOUNT_SERVER)));
 
       string root = "HedgeDrift\\Audit";
-      string owner = root + "\\" + identity;
+      string symbol_folder = root + "\\" + stem;
+      string owner = symbol_folder + "\\" + account_identity;
       m_folder = owner + "\\" + m_run;
+
+      string config_path = m_folder + "\\" + stem + "_config.json";
+      string events_path = m_folder + "\\" + stem + "_events.csv";
 
       FolderCreate("HedgeDrift");
       FolderCreate(root);
+      FolderCreate(symbol_folder);
       FolderCreate(owner);
       FolderCreate(m_folder);
 
-      if(FileIsExist(m_folder + "\\config.json") ||
-         FileIsExist(m_folder + "\\events.csv"))
+      if(FileIsExist(config_path) ||
+         FileIsExist(events_path))
       {
          Disable("Run path collision");
          return;
       }
 
       int config_file = FileOpen(
-         m_folder + "\\config.json",
+         config_path,
          FILE_WRITE | FILE_TXT | FILE_ANSI, 0, CP_UTF8
       );
 
       if(config_file == INVALID_HANDLE)
       {
-         Disable("Cannot open config.json");
+         Disable("Cannot open " + stem + "_config.json");
          return;
       }
 
@@ -309,12 +351,12 @@ public:
 
       if(!config_ok)
       {
-         Disable("Cannot finish config.json");
+         Disable("Cannot finish " + stem + "_config.json");
          return;
       }
 
       m_file = FileOpen(
-         m_folder + "\\events.csv",
+         events_path,
          FILE_WRITE | FILE_TXT | FILE_ANSI |
          FILE_SHARE_READ,
          0, CP_UTF8
@@ -322,7 +364,7 @@ public:
 
       if(m_file == INVALID_HANDLE)
       {
-         Disable("Cannot open events.csv");
+         Disable("Cannot open " + stem + "_events.csv");
          return;
       }
 
@@ -345,7 +387,9 @@ public:
          Q(MQLInfoInteger(MQL_TESTER) ? "tester_server_time" : "monotonic") +
          "}");
 
-      Print("[HedgeDrift][INFO] Lean Audit ON: MQL5\\Files\\", m_folder);
+      Print("[HedgeDrift][INFO] Lean Audit ON: MQL5\\Files\\", m_folder,
+            " | Config=", stem, "_config.json",
+            " | Events=", stem, "_events.csv");
    }
 
    void Record(const string event,

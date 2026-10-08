@@ -25,11 +25,18 @@ https://github.com/vhpknn/HedgeDrift_Minimal
 
 Current baseline commit:
 
-98e12e954d1c8ba744378edadbf9d3edb97eb25b
+8f4e0bbd1859d3fea7cb75434517fc573081c36b
 
 Short hash:
 
-98e12e9
+8f4e0bb
+
+Pending local patch:
+
+AuditNames-v1 — readable Symbol/Magic folders and filenames
+
+Compile ของ AuditNames-v1: [ ]
+New commit หลังประกอบ: ยังไม่ระบุ
 
 ก่อนทำ FIND/REPLACE ต้องตรวจซอร์สและ Diff ของฐานที่ใช้จริง
 ห้ามใช้ ac464b0, 8ed35ad, 98b6bc4 หรือ eb2033c เป็นฐานล่าสุดของฟีเจอร์ใหม่โดยไม่ตั้งใจ
@@ -1201,12 +1208,15 @@ Update after compile/test:
 
 Code baseline:
 
-- Source baseline: 03999bc1c9dd42a97cc3959acbd66e662b40fcbb
-- Audit build tag: 03999bc+LeanAudit-v1
-- Tag นี้หมายถึง baseline + patch ไม่ใช่ Git hash ของ code ใหม่
-- Compile: [ ]
+- Original Audit implementation: 66ee79c1315de133611f93ee6ac51f5a0d726671
+- Current source baseline: 8f4e0bbd1859d3fea7cb75434517fc573081c36b
+- Pending naming patch: AuditNames-v1
+- Audit build tag หลังประกอบ: 8f4e0bb+AuditNames-v1
+- Tag หมายถึง baseline + patch ไม่ใช่ Git hash ของ commit ใหม่
+- Audit implementation: มีโค้ดแล้ว ตรวจจาก Git Diff
+- Compile ของ naming patch: [ ]
 - Runtime / Audit ON-OFF comparison: [ ]
-- New commit: ยังไม่ระบุ
+- New commit หลัง naming patch: ยังไม่ระบุ
 
 Input:
 
@@ -1228,9 +1238,25 @@ Scope:
 
 Output:
 
-MQL5\Files\HedgeDrift\Audit\<identity>\<run-id>\
-- config.json
-- events.csv
+MQL5\Files\HedgeDrift\Audit\<symbol_magic>\<account_serverhash>\<run-id>\
+
+Example:
+
+MQL5\Files\HedgeDrift\Audit\XAUUSD_998856\<login>_<serverhash>\<run-id>\
+- XAUUSD_998856_config.json
+- XAUUSD_998856_events.csv
+
+Rules:
+
+- แยกโฟลเดอร์แรกตาม Symbolจริง + Magic
+- คง suffix ของ Symbol เช่น XAUUSDm
+- แยก Account/Server ในโฟลเดอร์ถัดไป
+- แยก RunID ไม่ Append ทับรอบเก่า
+- Symbol ที่มีอักขระต้องห้าม/ยาวเกิน จะ sanitize และเติม Hash
+- config.json ภายในยังบันทึก Symbol/Account/Serverจริง
+- state.json คงตำแหน่ง Persistence เดิม
+- ไม่มีการย้ายหรือลบ Audit files เก่า
+- CSV columns / queue / pump / limits ไม่เปลี่ยน
 
 CSV columns:
 
@@ -1239,7 +1265,12 @@ program, symbol, magic, cycle, mode, position_ticket,
 order_id, deal_id, repeat_count, details_json
 
 Identity:
-Account + Server hash + Symbol hash + Magic
+
+- Readable group: Symbol + Magic
+- Account isolation: Account Login + Server hash
+- Run isolation: RunID เดิม
+- Symbol hash ใช้ต่อท้ายชื่อเฉพาะกรณี sanitize/shorten
+- ข้อมูลตัวตนจริงยังอยู่ใน config และ CSV
 
 Runtime flag order:
 auto_lot, hard_cut_loss, hedge_trigger_lock, cut_loss_relock,
@@ -1295,11 +1326,25 @@ Checklist:
 | AUD-11 | [ ] | ปิดปกติ | มีRUN_ENDและlost/max_io_us |
 | AUD-12 | [ ] | ปิดโปรแกรมฉับพลันบน Demo | ยอมรับว่า Log ส่วนท้ายที่ยังอยู่ในบัฟเฟอร์อาจหาย และไม่สรุป PASS จากหลักฐานที่ขาด |
 
+### Audit Naming Checklist
+
+| ID | Status | Action | Expected |
+|---|---|---|---|
+| AUD-N01 | [ ] | Audit ON ด้วย XAUUSD/Magic ทดสอบ | โฟลเดอร์แรกเป็น XAUUSD_<magic> |
+| AUD-N02 | [ ] | ตรวจ Run folder | Config/Events มี prefix Symbol_Magic |
+| AUD-N03 | [ ] | รันคนละ Magic | ไม่ใช้โฟลเดอร์หรือไฟล์ร่วมกัน |
+| AUD-N04 | [ ] | Restart EA | สร้าง Run ใหม่ ไม่เขียนทับ Run เก่า |
+| AUD-N05 | [ ] | ตรวจ Config/CSV | Symbol/Magic/Accountจริงตรงกับกราฟ |
+| AUD-N06 | [ ] | Audit OFF | ไม่สร้าง Run folder ใหม่ |
+| AUD-N07 | [ ] | ตรวจ Persistence | state.json เดิมไม่ถูกย้ายหรือเปลี่ยน Identity |
+
 ### Lean Audit Validation Record
 
-- Audit code baseline: ยังไม่ระบุ
-- Audit implementation commit: ยังไม่ระบุ
-- Audit compile result: ยังไม่มีผลยืนยันในเอกสารนี้
+- Audit code baseline: 8f4e0bb
+- Audit implementation commit: 66ee79c
+- Audit naming patch: AuditNames-v1
+- Audit naming compile result: ยังไม่มีผลยืนยันในเอกสารนี้
+- Audit Runtime validation: ยังรอหลักฐาน
 - Audit ON/OFF comparison: [ ]
 - Audit write-failure test: [ ]
 - Log size / buffer-limit test: [ ]
@@ -1440,66 +1485,3 @@ Include อยู่ข้างไฟล์ EA ภายในโฟลเด�
 - แนบผลทดสอบล่าสุดที่เกี่ยวข้อง
 - ห้ามแนบ Token หรือข้อมูลลับ
 
-### Immediate next action
-
-1. รอผล Master Integration Test รวมจากผู้ใช้
-2. เก็บเฉพาะ [-] และข้อที่ยังพิสูจน์ไม่ได้
-3. ตรวจ Commit/.set/Log/state ที่ตรงกัน
-4. แยก Environment กับ Logic
-5. จัดกลุ่ม root causes
-6. ส่ง Mini-Batch FIND/REPLACE ในแชต
-7. Compileรวม
-8. Retestข้อFAILและRegressionที่เกี่ยวข้อง
-9. อัปเดต HANDOFF และ Commitเมื่อจบ milestone
-
-### Do not do
-
-- ไม่ประกาศ Phase 3/4 Runtimeผ่านครบจาก Compileอย่างเดียว
-- ไม่ติ๊ก [*] ให้อัตโนมัติ
-- ไม่ลบ stateเพื่อซ่อนRecoveryError
-- ไม่ resetทุนโดยเงียบ
-- ไม่ใช้ beginBasketใหม่ตอนเติมขา
-- ไม่ปลด Open guardทั้งหมด
-- ไม่ mergeสามStrategyเข้าด้วยกัน
-- ไม่เปลี่ยน Timer300เป็นสัญญาณLock
-- ไม่ให้ CloseAll/RRเติมคู่รอบเดิมเอง
-- ไม่เพิ่ม Auto-Lot/Martingale โดยตีความเอง
-- ไม่ขอSourceทั้งชุดเมื่อGitมีข้อมูล
-- ไม่สร้างไฟล์ดาวน์โหลด
-
-### Handoff summary for the next AI
-
-โปรเจกต์นี้เป็น MT5 Portable EA แบบ8โมดูล Includeอยู่ข้างEA
-ล่าสุด98e12e9 Compileผ่าน0errors0warnings2257ms
-มีManual/TimeoutHedge/Lockแยก, HardSL, Fixed/DynamicBE,
-BasketRR, VirtualAccounting, FlatJSONPersistence,
-ResponsivePanel, TrailingTPแยกPosition+ProfitGuard,
-และAutoReHedgeTimerแยกฝั่ง
-
-ยังรอIntegrationTestรวม
-Auto-LotยังFIXED LOT
-มีSource-confirmed Timer timestamp reset gapที่KI-001
-ห้ามบอกRuntimeผ่านทั้งหมด
-ให้ตรวจGit/หลักฐานแล้วรวบยอดPatchตามผล[-]ของผู้ใช้
-
----
-
-## 19. Change Log
-
-| Date | Change | Validation |
-|---|---|---|
-| 2026-10-07 | Foundations + Manual Native Trade | Phase1/2 runtimeเดิมผ่านตามผู้ใช้ |
-| 2026-10-07 | Risk/Strategy + Responsive UI | Compileผ่าน; Runtimeเบื้องต้น |
-| 2026-10-08 | Phase4 Persistence/Recovery/Timeout | Compileผ่าน |
-| 2026-10-08 | Trailing TP + Profit Guard + Auto Re-Hedge | Compileผ่าน2257ms |
-| 2026-10-08 | HANDOFFเริ่มต้น + Master Checklist | Documentation; รอIntegration results |
-
-Update procedure:
-
-- เปลี่ยน Last updated
-- เปลี่ยน current commitเมื่อมีcommitใหม่
-- เก็บcompileผลจริง
-- เปลี่ยนChecklistเฉพาะข้อที่มีหลักฐาน
-- ย้ายRuntimeFAILลงregister
-- ระบุfixed commitและretestผล
-- ไม่ลบประวัติFAILเพื่อให้เอกสารดูผ่าน
