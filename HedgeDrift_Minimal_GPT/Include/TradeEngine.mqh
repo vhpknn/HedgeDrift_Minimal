@@ -302,6 +302,23 @@ public:
       return true;
    }
 
+   int PendingCount()
+   {
+      int count = 0;
+
+      for(int i = OrdersTotal() - 1; i >= 0; i--)
+      {
+         if(OrderGetTicket(i) == 0)
+            continue;
+
+         if(OrderGetString(ORDER_SYMBOL) == m_symbol &&
+            (ulong)OrderGetInteger(ORDER_MAGIC) == m_magic)
+            count++;
+      }
+
+      return count;
+   }
+
    int Count()
    {
       int count = 0;
@@ -325,9 +342,9 @@ public:
       if(m_busy)
          return false;
 
-      if(Count() > 0)
+      if(Count() > 0 || PendingCount() > 0)
       {
-         Print("[HedgeDrift][WARN] Open rejected: basket already active.");
+         Print("[HedgeDrift][WARN] Open rejected: basket/order already active.");
          return false;
       }
 

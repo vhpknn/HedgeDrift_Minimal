@@ -395,7 +395,7 @@ public:
       }
 
       Layout();
-      Text("WARNING", "PHASE 3 | FIXED LOT | SERVER TIME");
+      Text("WARNING", "PHASE 4 | FIXED LOT | SERVER TIME");
 
       ChartRedraw(0);
       return true;
@@ -422,7 +422,7 @@ public:
 
       string mode = g_hd.strategy == MODE_MANUAL_FREE
          ? "MANUAL"
-         : (g_hd.strategy == MODE_TIME_SESSION ? "SESSION" : "LOCK");
+         : (g_hd.strategy == MODE_TIMEOUT_HEDGE ? "TIMEOUT" : "LOCK");
 
       Text("STATE",
            mode + " | Cycle: " + HD_CycleName(g_hd.cycle)

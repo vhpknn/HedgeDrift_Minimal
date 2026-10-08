@@ -5,7 +5,7 @@
 
 enum ENUM_STRATEGY_MODE
 {
-   MODE_TIME_SESSION = 0,
+   MODE_TIMEOUT_HEDGE = 0,
    MODE_LOCK_PRICE   = 1,
    MODE_MANUAL_FREE  = 2
 };
@@ -66,6 +66,10 @@ input bool   InpEnableSession2      = true;
 input string InpSession2Time        = "10:00-14:00";
 input bool   InpEnableSession3      = true;
 input string InpSession3Time        = "21:00-24:00";
+
+input group "Persistence"
+input bool InpEnablePersistence = true;
+input bool InpPersistenceInTester = false;
 
 input group "Identity"
 input ulong InpMagicNumber = 998874;

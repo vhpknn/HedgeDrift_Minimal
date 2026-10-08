@@ -1,7 +1,7 @@
 #ifndef HEDGEDRIFT_ACCOUNTING_ENGINE_MQH
 #define HEDGEDRIFT_ACCOUNTING_ENGINE_MQH
 
-#include "Config.mqh"
+#include "Persistence.mqh"
 
 class CHDAccounting
 {
@@ -14,6 +14,8 @@ private:
    int    m_refill_count;
    double m_realized;
    double m_floating;
+   datetime m_epoch;
+   bool m_healthy;
 
    ulong m_processed_deals[];
    ulong m_owned_positions[];
@@ -43,6 +45,7 @@ private:
       int size = ArraySize(m_processed_deals);
       if(ArrayResize(m_processed_deals, size + 1) != size + 1)
       {
+         m_healthy = false;
          Print("[HedgeDrift][ERROR] Cannot store Deal ID.");
          return false;
       }
@@ -62,6 +65,7 @@ private:
       int size = ArraySize(m_owned_positions);
       if(ArrayResize(m_owned_positions, size + 1) != size + 1)
       {
+         m_healthy = false;
          Print("[HedgeDrift][ERROR] Cannot store Position ID.");
          return false;
       }
@@ -75,8 +79,16 @@ private:
       if(HasPosition(identifier))
          return true;
 
-      if(identifier == 0 || !HistorySelectByPosition(identifier))
+      if(identifier == 0)
          return false;
+
+      if(!HistorySelectByPosition(identifier))
+      {
+         m_healthy = false;
+         Print("[HedgeDrift][ERROR] Cannot inspect position history: ",
+               identifier);
+         return false;
+      }
 
       int total = HistoryDealsTotal();
 
@@ -113,6 +125,8 @@ public:
       m_refill_count = 0;
       m_realized     = 0.0;
       m_floating     = 0.0;
+      m_epoch        = TimeCurrent();
+      m_healthy      = true;
 
       ArrayResize(m_processed_deals, 0);
       ArrayResize(m_owned_positions, 0);
@@ -168,6 +182,7 @@ public:
 
       if(!HistoryDealSelect(ticket))
       {
+         m_healthy = false;
          Print("[HedgeDrift][ERROR] Cannot select deal ", ticket);
          return false;
       }
@@ -276,6 +291,113 @@ public:
       Print("[HedgeDrift][INFO] Refill=", DoubleToString(amount, 2),
             " Count=", m_refill_count,
             " EQ=", DoubleToString(Balance(), 2));
+
+      return true;
+   }
+
+   bool Healthy()
+   {
+      return m_healthy;
+   }
+
+   void SaveState(CHDPersistence &state)
+   {
+      state.PutD("acc_base", m_base);
+      state.PutD("acc_refill", m_refill);
+      state.PutU("acc_refill_count", (ulong)m_refill_count);
+      state.PutD("acc_realized", m_realized);
+      state.PutU("acc_epoch", (ulong)m_epoch);
+      state.PutIds("acc_deals", m_processed_deals);
+      state.PutIds("acc_positions", m_owned_positions);
+   }
+
+   bool LoadState(CHDPersistence &state)
+   {
+      double base = state.D("acc_base");
+      double refill = state.D("acc_refill");
+      int refill_count = state.I("acc_refill_count");
+      double realized = state.D("acc_realized");
+      ulong epoch = state.U("acc_epoch");
+
+      if(!state.Good() || base <= 0.0 ||
+         refill < 0.0 || epoch == 0)
+         return false;
+
+      if(!state.Ids("acc_deals", m_processed_deals) ||
+         !state.Ids("acc_positions", m_owned_positions))
+         return false;
+
+      m_base = base;
+      m_refill = refill;
+      m_refill_count = refill_count;
+      m_realized = realized;
+      m_epoch = (datetime)epoch;
+      m_healthy = true;
+
+      RefreshFloating();
+      return true;
+   }
+
+   bool ReplayTickets(ulong &tickets[])
+   {
+      ArrayResize(tickets, 0);
+
+      if(!m_healthy)
+         return false;
+
+      if(!HistorySelect(m_epoch - 1, TimeCurrent()))
+      {
+         m_healthy = false;
+         return false;
+      }
+
+      long times[];
+      int total = HistoryDealsTotal();
+
+      // Collect first. ProcessDeal may change History selection.
+      for(int i = 0; i < total; i++)
+      {
+         ulong ticket = HistoryDealGetTicket(i);
+
+         if(ticket == 0 || HasDeal(ticket))
+            continue;
+
+         if(HistoryDealGetString(ticket, DEAL_SYMBOL) != m_symbol)
+            continue;
+
+         ENUM_DEAL_TYPE type =
+            (ENUM_DEAL_TYPE)HistoryDealGetInteger(ticket, DEAL_TYPE);
+
+         if(type != DEAL_TYPE_BUY && type != DEAL_TYPE_SELL)
+            continue;
+
+         long time_msc =
+            HistoryDealGetInteger(ticket, DEAL_TIME_MSC);
+
+         int size = ArraySize(tickets);
+
+         if(ArrayResize(tickets, size + 1) != size + 1 ||
+            ArrayResize(times, size + 1) != size + 1)
+         {
+            m_healthy = false;
+            return false;
+         }
+
+         int insert = size;
+
+         while(insert > 0 &&
+              (times[insert - 1] > time_msc ||
+              (times[insert - 1] == time_msc &&
+               tickets[insert - 1] > ticket)))
+         {
+            tickets[insert] = tickets[insert - 1];
+            times[insert] = times[insert - 1];
+            insert--;
+         }
+
+         tickets[insert] = ticket;
+         times[insert] = time_msc;
+      }
 
       return true;
    }

@@ -9,12 +9,19 @@
 #include "Include\PanelEngine.mqh"
 #include "Include\RiskEngine.mqh"
 #include "Include\StrategyEngine.mqh"
+#include "Include\Persistence.mqh"
 
 CHDAccounting     g_accounting;
 CHDTradeEngine    g_trade;
 CHDPanel          g_panel;
 CHDRiskEngine     g_risk;
 CHDStrategyEngine g_strategy;
+CHDPersistence   g_state;
+
+bool g_initialized = false;
+bool g_recovery_ok = false;
+bool g_storage_ok = true;
+datetime g_last_replay = 0;
 
 void HD_UpdateDisplay()
 {
@@ -22,21 +29,124 @@ void HD_UpdateDisplay()
    g_panel.Update(g_accounting);
 }
 
-bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction)
+bool HD_SaveState()
 {
-   if(g_trade.Count() > 0)
+   if(!g_initialized || !g_recovery_ok)
+      return false;
+
+   if(!g_state.Enabled())
    {
-      Print("[HedgeDrift][WARN] Open rejected: basket already active.");
+      g_storage_ok = true;
+      return true;
+   }
+
+   g_state.Begin();
+   HD_SaveRuntime(g_state);
+   g_accounting.SaveState(g_state);
+   g_risk.SaveState(g_state);
+   g_strategy.SaveState(g_state);
+
+   bool success = g_state.Commit();
+
+   if(!success && g_storage_ok)
+   {
+      Print("[HedgeDrift][ERROR] State save failed. ",
+            "New entries blocked; existing risk management remains active.");
+   }
+
+   if(success && !g_storage_ok)
+      Print("[HedgeDrift][INFO] State storage recovered.");
+
+   g_storage_ok = success;
+   return success;
+}
+
+bool HD_ReconcileDeals(const bool force)
+{
+   if(!force && g_last_replay == TimeCurrent())
+      return g_accounting.Healthy();
+
+   ulong tickets[];
+
+   if(!g_accounting.ReplayTickets(tickets))
+   {
+      g_recovery_ok = false;
+      Print("[HedgeDrift][ERROR] History reconciliation failed.");
       return false;
    }
 
-   if(!g_strategy.SessionAllowed())
+   for(int i = 0; i < ArraySize(tickets); i++)
    {
-      Print("[HedgeDrift][WARN] Open blocked outside enabled sessions.");
+      if(!g_accounting.ProcessDeal(tickets[i]))
+      {
+         if(!g_accounting.Healthy())
+         {
+            g_recovery_ok = false;
+            return false;
+         }
+
+         continue;
+      }
+
+      double close_price = 0.0;
+
+      if(g_hd.strategy == MODE_LOCK_PRICE &&
+         g_hd.cut_loss_relock &&
+         g_risk.HardCutPrice(tickets[i], close_price))
+      {
+         g_strategy.Relock(close_price);
+      }
+   }
+
+   // Finish the basket only after the replay batch is processed.
+   if(g_trade.Count() == 0 && g_trade.PendingCount() == 0)
+   {
+      g_strategy.BasketClosed();
+
+      if(g_hd.cycle == HD_ACTIVE ||
+         g_hd.cycle == HD_CLOSING ||
+         g_hd.cycle == HD_OPENING)
+         HD_SetCycle(HD_IDLE);
+   }
+   else if(g_trade.Count() > 0)
+   {
+      HD_SetCycle(g_risk.Closing() ? HD_CLOSING : HD_ACTIVE);
+   }
+
+   g_accounting.RefreshFloating();
+   g_last_replay = TimeCurrent();
+   return g_accounting.Healthy();
+}
+
+bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
+                   const bool manual)
+{
+   if(!g_recovery_ok || !g_storage_ok ||
+      !HD_ReconcileDeals(true))
+   {
+      Print("[HedgeDrift][ERROR] Open blocked: recovery/storage not ready.");
       return false;
    }
 
+   if(g_trade.Count() > 0 || g_trade.PendingCount() > 0)
+   {
+      Print("[HedgeDrift][WARN] Open rejected: basket/order already active.");
+      return false;
+   }
+
+   // Manual bypasses strategy entry filters, not trade/risk safety.
+   if(!manual && !g_strategy.SessionAllowed())
+   {
+      Print("[HedgeDrift][WARN] Automatic entry blocked outside sessions.");
+      return false;
+   }
+
+   g_risk.Init();
    HD_SetCycle(HD_OPENING);
+
+   // Save intent first; never repeat it blindly after a restart.
+   if(!HD_SaveState())
+      return false;
 
    bool opened = g_trade.Open(direction, InpStartLot);
    int count = g_trade.Count();
@@ -66,11 +176,18 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction)
       HD_SetCycle(HD_IDLE);
    }
 
+   if(count == 0 && g_trade.PendingCount() == 0)
+      g_strategy.OpenFailed();
+
+   HD_SaveState();
    return opened && count > 0;
 }
 
 void HD_RunPhase3()
 {
+   HD_ReconcileDeals(false);
+
+   // Existing risk still runs even when new entries are blocked.
    bool risk_action = g_risk.Tick(g_trade, g_accounting);
 
    if(g_trade.Count() == 0)
@@ -80,12 +197,15 @@ void HD_RunPhase3()
    }
 
    // Never start a new basket in the same pass as an RR close attempt.
-   if(!risk_action)
+   if(!risk_action &&
+      g_recovery_ok &&
+      g_storage_ok &&
+      g_trade.PendingCount() == 0)
    {
       ENUM_TRADE_DIRECTION direction = DIR_BOTH;
 
       if(g_strategy.Signal(g_trade.Count(), direction))
-         HD_OpenBasket(direction);
+         HD_OpenBasket(direction, false);
    }
 }
 
@@ -102,22 +222,96 @@ int OnInit()
    if(!HD_ValidateConfig())
       return INIT_PARAMETERS_INCORRECT;
 
+   g_initialized = false;
+   g_recovery_ok = false;
+   g_storage_ok = true;
+   g_last_replay = 0;
+
    HD_InitRuntime();
    g_risk.Init();
    g_strategy.Init();
 
+   if(!g_trade.Init(_Symbol, InpMagicNumber))
+      return INIT_FAILED;
+
+   if(!g_state.Init())
+      return INIT_FAILED;
+
    if(!g_accounting.Init(_Symbol, InpMagicNumber, InpBaseCapital))
       return INIT_FAILED;
 
-   if(g_accounting.PositionCount() > 0)
+   if(g_trade.PendingCount() > 0)
    {
-      Print("[HedgeDrift][ERROR] Phase 3 requires an empty initial basket. ",
-            "Close existing EA positions before loading.");
+      Print("[HedgeDrift][ERROR] Outstanding EA orders detected. ",
+            "Inspect terminal orders before restarting.");
       return INIT_FAILED;
    }
 
-   if(!g_trade.Init(_Symbol, InpMagicNumber))
-      return INIT_FAILED;
+   if(g_state.Exists())
+   {
+      if(!g_state.Load())
+         return INIT_FAILED;
+
+      bool settings_match = g_state.SettingsMatch();
+
+      if(!g_state.Good())
+         return INIT_FAILED;
+
+      if(g_trade.Count() > 0 && !settings_match)
+      {
+         Print("[HedgeDrift][ERROR] Inputs changed while a basket exists. ",
+               "Restore the previous .set first.");
+         return INIT_PARAMETERS_INCORRECT;
+      }
+
+      if(!HD_LoadRuntime(g_state) ||
+         !g_accounting.LoadState(g_state) ||
+         !g_risk.LoadState(g_state) ||
+         !g_strategy.LoadState(g_state) ||
+         !g_state.Good())
+      {
+         Print("[HedgeDrift][ERROR] Invalid state contents.");
+         return INIT_FAILED;
+      }
+
+      if(!HD_ReconcileDeals(true))
+         return INIT_FAILED;
+
+      if(!g_risk.CoversLiveBasket())
+      {
+         Print("[HedgeDrift][ERROR] Live basket does not match saved risk. ",
+               "No automatic recovery or new entries will be attempted.");
+         return INIT_FAILED;
+      }
+
+      if(!settings_match)
+      {
+         // Flat basket: preserve money, apply the new strategy .set.
+         HD_InitRuntime();
+         g_risk.Init();
+         g_strategy.Init();
+
+         Print("[HedgeDrift][INFO] Flat recovery: new Inputs applied; ",
+               "virtual accounting preserved.");
+      }
+      else
+      {
+         Print("[HedgeDrift][INFO] Runtime settings restored from snapshot.");
+      }
+   }
+   else
+   {
+      if(g_trade.Count() > 0)
+      {
+         Print("[HedgeDrift][ERROR] Existing basket without a saved state. ",
+               "Cannot reconstruct original risk safely.");
+         return INIT_FAILED;
+      }
+
+      Print("[HedgeDrift][INFO] Fresh virtual account.");
+   }
+
+   g_recovery_ok = true;
 
    if(!g_panel.Create())
    {
@@ -131,8 +325,8 @@ int OnInit()
    {
       HD_SetCycle(HD_ACTIVE);
 
-      Print("[HedgeDrift][WARN] Existing positions detected. ",
-            "Virtual accounting starts fresh; historical PnL is excluded.");
+      Print("[HedgeDrift][INFO] Existing basket restored. ",
+            "Original initial risk retained.");
    }
 
    if(!EventSetTimer(1))
@@ -146,8 +340,17 @@ int OnInit()
          " Symbol=", _Symbol,
          " Magic=", InpMagicNumber);
 
-   Print("[HedgeDrift][INFO] Phase 3: Lock/Session strategy and risk enabled. ",
-         "Fixed StartLot. No persistence or cycle timeout.");
+   Print("[HedgeDrift][INFO] Phase 4: Manual / Timeout Hedge / Lock. ",
+         "Persistence=", g_state.Enabled() ? "ON" : "OFF",
+         " | Fixed StartLot.");
+
+   g_initialized = true;
+
+   if(!HD_SaveState())
+   {
+      g_initialized = false;
+      return INIT_FAILED;
+   }
 
    HD_UpdateDisplay();
    return INIT_SUCCEEDED;
@@ -156,6 +359,15 @@ int OnInit()
 void OnDeinit(const int reason)
 {
    EventKillTimer();
+
+   if(g_initialized && g_recovery_ok)
+   {
+      HD_ReconcileDeals(true);
+      HD_SaveState();
+   }
+
+   g_initialized = false;
+   g_state.Close();
    g_panel.Destroy();
    Comment("");
 
@@ -169,7 +381,11 @@ void OnTick()
 
 void OnTimer()
 {
-   // Timer refreshes UI; automatic signals run on market ticks only.
+   if(!g_initialized)
+      return;
+
+   HD_ReconcileDeals(false);
+   HD_SaveState();
    HD_UpdateDisplay();
 }
 
@@ -180,22 +396,13 @@ void OnTradeTransaction(const MqlTradeTransaction &trans,
    if(trans.type != TRADE_TRANSACTION_DEAL_ADD)
       return;
 
-   if(g_accounting.ProcessDeal(trans.deal))
-   {
-      double close_price = 0.0;
+   if(!g_initialized)
+      return;
 
-      if(g_hd.cut_loss_relock &&
-         g_risk.HardCutPrice(trans.deal, close_price))
-      {
-         g_strategy.Relock(close_price);
-      }
+   if(HD_ReconcileDeals(true))
+      HD_SaveState();
 
-      if(g_trade.Count() == 0)
-         g_strategy.BasketClosed();
-
-      HD_SyncManualCycle();
-      HD_UpdateDisplay();
-   }
+   HD_UpdateDisplay();
 }
 
 void OnChartEvent(const int id,
@@ -296,6 +503,7 @@ void OnChartEvent(const int id,
          g_hd.cut_loss_relock = !g_hd.cut_loss_relock;
       }
 
+      HD_SaveState();
       HD_UpdateDisplay();
       return;
    }
@@ -325,9 +533,14 @@ void OnChartEvent(const int id,
    else if(action == HD_ACTION_CLOSE)
    {
       if(g_trade.Count() > 0)
+      {
+         g_risk.RequestClose();
          HD_SetCycle(HD_CLOSING);
+         HD_SaveState();
+      }
 
       g_trade.CloseAll();
+      HD_ReconcileDeals(true);
       HD_SyncManualCycle();
    }
    else
@@ -345,9 +558,11 @@ void OnChartEvent(const int id,
          else if(action == HD_ACTION_HEDGE)
             direction = DIR_HEDGE;
 
-         HD_OpenBasket(direction);
+         HD_OpenBasket(direction, true);
       }
    }
 
+   HD_ReconcileDeals(true);
+   HD_SaveState();
    HD_UpdateDisplay();
 }

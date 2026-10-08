@@ -37,6 +37,103 @@ public:
       m_last_close_attempt = 0;
    }
 
+   void RequestClose()
+   {
+      m_closing = true;
+      m_last_close_attempt = 0;
+   }
+
+   bool Closing()
+   {
+      return m_closing;
+   }
+
+   void SaveState(CHDPersistence &state)
+   {
+      state.PutD("risk_initial", m_initial_risk);
+      state.PutU("risk_ready", (ulong)m_ready);
+      state.PutU("risk_closing", (ulong)m_closing);
+      state.PutU("risk_count", (ulong)ArraySize(m_items));
+
+      for(int i = 0; i < ArraySize(m_items); i++)
+      {
+         string key = "risk_" + IntegerToString(i);
+
+         state.PutU(key + "_id", m_items[i].identifier);
+         state.PutD(key + "_sl", m_items[i].initial_sl);
+         state.PutU(key + "_hard", (ulong)m_items[i].hard_sl);
+      }
+   }
+
+   bool LoadState(CHDPersistence &state)
+   {
+      m_initial_risk = state.D("risk_initial");
+      m_ready = state.B("risk_ready");
+      m_closing = state.B("risk_closing");
+
+      int count = state.I("risk_count");
+      m_last_close_attempt = 0;
+
+      if(!state.Good() || m_initial_risk < 0.0 ||
+         count > 2 || ArrayResize(m_items, count) != count)
+         return false;
+
+      for(int i = 0; i < count; i++)
+      {
+         string key = "risk_" + IntegerToString(i);
+
+         m_items[i].identifier = state.U(key + "_id");
+         m_items[i].initial_sl = state.D(key + "_sl");
+         m_items[i].hard_sl = state.B(key + "_hard");
+
+         if(m_items[i].identifier == 0 ||
+            m_items[i].initial_sl < 0.0)
+            return false;
+      }
+
+      return state.Good();
+   }
+
+   bool CoversLiveBasket()
+   {
+      int live = 0;
+
+      for(int i = PositionsTotal() - 1; i >= 0; i--)
+      {
+         if(PositionGetTicket(i) == 0 || !OwnedSelected())
+            continue;
+
+         live++;
+
+         ulong identifier =
+            (ulong)PositionGetInteger(POSITION_IDENTIFIER);
+
+         bool found = false;
+
+         for(int j = 0; j < ArraySize(m_items); j++)
+         {
+            if(m_items[j].identifier != identifier)
+               continue;
+
+            if(m_items[j].hard_sl &&
+               PositionGetDouble(POSITION_SL) <= 0.0)
+               return false;
+
+            found = true;
+            break;
+         }
+
+         if(!found)
+            return false;
+      }
+
+      if(live == 0)
+         return true;
+
+      return m_ready &&
+             (!g_hd.rr_target || m_initial_risk > 0.0);
+   }
+
    double InitialRisk()
    {
       return m_initial_risk;

@@ -11,6 +11,7 @@ private:
    bool m_spent;
    bool m_seen_basket;
    bool m_relock_pending;
+   datetime m_wait_since;
 
    bool InSession(const string range, const int now_minutes)
    {
@@ -39,11 +40,41 @@ public:
       m_spent = false;
       m_seen_basket = false;
       m_relock_pending = false;
+      m_wait_since = TimeCurrent();
+   }
+
+   void SaveState(CHDPersistence &state)
+   {
+      state.PutU("strategy_spent", (ulong)m_spent);
+      state.PutU("strategy_seen", (ulong)m_seen_basket);
+      state.PutU("strategy_relock", (ulong)m_relock_pending);
+      state.PutU("strategy_wait", (ulong)m_wait_since);
+   }
+
+   bool LoadState(CHDPersistence &state)
+   {
+      m_spent = state.B("strategy_spent");
+      m_seen_basket = state.B("strategy_seen");
+      m_relock_pending = state.B("strategy_relock");
+      m_wait_since = (datetime)state.U("strategy_wait");
+
+      // Do not replay a crossing from the EA downtime.
+      m_previous = 0.0;
+      m_previous_valid = false;
+
+      return state.Good() && m_wait_since >= 0;
+   }
+
+   void OpenFailed()
+   {
+      m_spent = false;
+      m_previous_valid = false;
+      m_wait_since = TimeCurrent();
    }
 
    bool SessionAllowed()
    {
-      if(g_hd.strategy != MODE_TIME_SESSION || !g_hd.session_filter)
+      if(g_hd.strategy != MODE_LOCK_PRICE || !g_hd.session_filter)
          return true;
 
       MqlDateTime server;
@@ -68,6 +99,7 @@ public:
    {
       m_previous_valid = false;
       m_spent = false;
+      m_wait_since = TimeCurrent();
    }
 
    void Relock(const double price)
@@ -78,6 +110,12 @@ public:
       g_hd.lock_price = price;
       m_previous_valid = false;
       m_relock_pending = true;
+
+      if(!m_seen_basket)
+      {
+         m_spent = false;
+         m_wait_since = TimeCurrent();
+      }
 
       Print("[HedgeDrift][INFO] HardCut Re-Lock=",
             DoubleToString(price, _Digits));
@@ -99,8 +137,9 @@ public:
       m_spent = !(g_hd.auto_new_cycle || m_relock_pending);
       m_relock_pending = false;
 
-      // Require a fresh crossing after basket closure.
+      // Require a fresh crossing; Timeout starts from basket closure.
       m_previous_valid = false;
+      m_wait_since = TimeCurrent();
    }
 
    bool Signal(const int positions, ENUM_TRADE_DIRECTION &direction)
@@ -128,6 +167,34 @@ public:
          m_previous = price;
          m_previous_valid = true;
          return false;
+      }
+
+      if(g_hd.strategy == MODE_TIMEOUT_HEDGE)
+      {
+         m_previous = price;
+         m_previous_valid = true;
+
+         if(!g_hd.cycle_timeout || m_spent)
+            return false;
+
+         HD_SetCycle(HD_WAIT_TRIGGER);
+
+         if(m_wait_since <= 0)
+         {
+            m_wait_since = TimeCurrent();
+            return false;
+         }
+
+         if(TimeCurrent() - m_wait_since < InpTimeoutSeconds)
+            return false;
+
+         direction = DIR_HEDGE;
+         m_spent = true;
+
+         Print("[HedgeDrift][INFO] Empty-basket timeout reached. ",
+               "Opening Hedge.");
+
+         return true;
       }
 
       if(g_hd.strategy == MODE_MANUAL_FREE ||
