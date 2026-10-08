@@ -1293,7 +1293,152 @@ Checklist:
 | AUD-09 | [ ] | Auditwritefailed/limit | Auditหยุดเอง Coreไม่ถูกปิดเพราะAudit |
 | AUD-10 | [ ] | AuditON/OFFข้อมูลทดสอบเดียวกัน | Logicไม่เปลี่ยน Overheadยอมรับได้ |
 | AUD-11 | [ ] | ปิดปกติ | มีRUN_ENDและlost/max_io_us |
-| AUD-12 | [ ] | ปิดฉับพลัน | ยอมรับท้ายLogหาย ไม่อ้างPASSจากหลักฐานขาด ยอมรับท้ายLogหาย ไม่อ้างPASSจากหลักฐานขาด
+| AUD-12 | [ ] | ปิดโปรแกรมฉับพลันบน Demo | ยอมรับว่า Log ส่วนท้ายที่ยังอยู่ในบัฟเฟอร์อาจหาย และไม่สรุป PASS จากหลักฐานที่ขาด |
+
+### Lean Audit Validation Record
+
+- Audit code baseline: ยังไม่ระบุ
+- Audit implementation commit: ยังไม่ระบุ
+- Audit compile result: ยังไม่มีผลยืนยันในเอกสารนี้
+- Audit ON/OFF comparison: [ ]
+- Audit write-failure test: [ ]
+- Log size / buffer-limit test: [ ]
+- Latest test date:
+- Evidence:
+
+ข้อกำหนดการรายงาน:
+
+- แผน Audit ไม่ใช่หลักฐานว่าโค้ด Audit ถูกเพิ่มแล้ว
+- ห้ามนำผล Compile ของ EA ก่อนเพิ่ม Audit มาใช้ยืนยัน Audit
+- ระบุ Commit ที่มี Audit จริงก่อนตรวจรับ
+- หาก Log ขาดช่วง ให้ข้อที่พิสูจน์ไม่ได้คงเป็น [ ]
+- ไม่ถือว่าไม่มี Error Log เท่ากับทำงานถูกต้อง
+- Audit failure ต้องไม่เปลี่ยนกติกาหรือบล็อก Trade/Risk
+- Guard ของ Persistence เดิมต้องไม่ถูกปลดเพียงเพื่อให้ Audit ทำงาน
+- ไฟล์ Audit แยกจาก state.json
+- ไม่เพิ่มโมดูล .mqh เกินเพดาน 8 ไฟล์
+
+---
+
+## 18. Next Work / AI Resume Instructions
+
+### 18.1 Immediate next action
+
+1. ตรวจว่า HANDOFF.md บันทึกครบและไม่มีหัวข้อ/ตารางซ้ำ
+2. ตรวจ Commit ล่าสุดที่ผู้ใช้ระบุจาก GitHub
+3. ตรวจว่า Lean Audit อยู่ในขั้นวางแผนหรือมีโค้ดแล้ว
+4. หากมีโค้ด ให้ตรวจ Diff และผล Compile ที่ตรงกับ Commit
+5. หากยังไม่มีโค้ด รอคำสั่งเริ่มงานก่อนส่ง Patch
+6. เก็บผล Master Integration Test รวมจากผู้ใช้
+7. รวบรวมข้อ [-] และข้อ [ ] ที่ยังพิสูจน์ไม่ได้
+8. แยก Environment, Configuration, Logic และ Evidence Gap
+9. จัดกลุ่ม root causes แล้วแก้เป็น Mini-Batch
+10. Compile รวมและรันทวนข้อที่เกี่ยวข้อง
+11. อัปเดต HANDOFF พร้อม Commit และหลักฐานจริง
+
+### 18.2 Source-of-truth rules
+
+- ใช้คำสั่งล่าสุดของผู้ใช้ร่วมกับ Git Commit/Diff
+- ห้ามใช้ main ที่เปลี่ยนไปมาเป็นฐาน Patch โดยไม่ล็อก Commit
+- HANDOFF อาจล้าหลังซอร์ส ต้องตรวจ Commit ก่อนอ้างว่าฟังก์ชันมีแล้ว
+- ไม่ขอ Source ทั้งชุดซ้ำ หาก Repository มีข้อมูล
+- หาก FIND ไม่ตรง ให้หยุดเฉพาะจุด ไม่แทนข้อความใกล้เคียงเอง
+
+### 18.3 Delivery rules
+
+- ส่ง Code ในแชตเท่านั้น
+- ห้ามสร้างไฟล์ดาวน์โหลด
+- ไฟล์ใหม่ส่ง Full Code พร้อม Path
+- ไฟล์เดิมส่ง FIND / REPLACE พร้อม Path
+- ห้ามส่ง Full Code ของไฟล์เดิม เว้นแต่ผู้ใช้ขอ
+- ไม่เพิ่ม Helper แยกไฟล์โดยไม่จำเป็น
+- คงเพดาน 8 ไฟล์ .mqh
+- ส่งงานที่เกี่ยวข้องเป็น Mini-Batch
+- ไม่บังคับ Runtime Test ทีละ Patch ระหว่างประกอบ
+- ใช้ Master Integration Test รวมตามแผนผู้ใช้
+
+### 18.4 Do not do
+
+- ไม่ประกาศ Runtime ผ่านครบจาก Compile อย่างเดียว
+- ไม่ติ๊ก [*] โดยไม่มีหลักฐาน
+- ไม่ลบ state เพื่อซ่อน Recovery Error
+- ไม่ reset ทุนจำลองโดยเงียบ
+- ไม่เรียก BeginBasket ใหม่เมื่อเติมขา Re-Hedge
+- ไม่ปลด Single Basket Guard ของ Open() ทั้งหมด
+- ไม่รวม Manual / Timeout / Lock เป็น Pipeline เดียว
+- ไม่ให้ Timeout รอ Lock Crossing
+- ไม่ให้ Manual ถูก Session/Lock/Timeout บล็อก
+- ไม่ให้ CLOSE ALL/RR ปลุก Re-Hedge ของรอบเดิมกลับมา
+- ไม่กล่าวว่า Auto-Lot ทำงานแล้ว ทั้งที่ Execution ยังใช้ StartLot
+- ไม่เพิ่ม Martingale หรือ Recovery Lot โดยตีความเอง
+- ไม่กล่าวว่า Audit ไม่มี Overhead
+- ไม่กล่าวว่า Peak ช่วงขาดการเชื่อมต่อถูกติดตามครบ
+- ไม่ใช้ข้อมูล Audit ที่ขาดช่วงยืนยันว่าผ่านทุกเงื่อนไข
+
+### 18.5 Resume summary for the next AI
+
+HedgeDrift เป็น MT5 Portable EA แบบ 8 โมดูล
+Include อยู่ข้างไฟล์ EA ภายในโฟลเดอร์โปรเจกต์
+
+ระบบหลักที่ประกอบไว้:
+- Manual / Timeout Hedge / Lock Crossing แยกกัน
+- Native OrderSend ไม่ใช้ CTrade
+- Hard SL, Fixed/Dynamic BE, Basket RR
+- Virtual Accounting และ Deal deduplication
+- Persistence/Recovery ผ่าน state.json
+- Trailing TP แยก Position พร้อม Profit > 0 Guard
+- Auto Re-Hedge ใช้ Timer BUY/SELL แยกกัน
+- Responsive Panel, Minimize และ Tooltip ภาษาไทย
+- ชื่อแสดง Equity / Profit / Total โดยสูตรบัญชีเดิม
+
+สถานะ:
+- มีผล Compile ผ่านของชุดหลักตามรายงานผู้ใช้
+- ยังต้องตรวจ Runtime รวมตาม Master Checklist
+- Auto-Lot ยังไม่เชื่อม Execution
+- KI-001 เป็นช่องว่างการล้าง Timer timestamps ที่พบจากซอร์ส
+- Lean Audit ต้องตรวจ implementation commit และผลทดสอบก่อนสรุปสถานะ
+
+งานถัดไปต้องยึด Commit จริง ไม่เดาว่าโค้ดในแชตถูกประกอบครบแล้ว
+
+---
+
+## 19. Change Log
+
+| Date | Change | Validation |
+|---|---|---|
+| 2026-10-07 | Foundations + Manual Native Trade | Phase 1/2 Runtime เดิมผ่านตามรายงานผู้ใช้ |
+| 2026-10-07 | Risk/Strategy + Responsive UI | Compile ผ่าน; Runtime เบื้องต้น |
+| 2026-10-08 | Phase 4 Persistence/Recovery/Timeout | Compile ผ่านตามรายงานผู้ใช้ |
+| 2026-10-08 | Trailing TP + Profit Guard + Auto Re-Hedge | Compile ผ่าน 2257 ms ตามรายงานผู้ใช้ |
+| 2026-10-08 | HANDOFF + Master Integration Checklist | เอกสารสำหรับตรวจรวม |
+| 2026-10-08 | Tooltip ไทย / ชื่อเต็ม / Inputs ไทย / ปรับ Panel | อ้างผลและสถานะตามหัวข้อ UI; ต้องผูกกับ Commit |
+| 2026-10-08 | Selector/Action button colors | ต้องบันทึกผล Compile และตรวจสีของชุดล่าสุด |
+| 2026-10-08 | Lean Audit Log v1 specification | ตรวจ implementation/compile evidence ก่อนเปลี่ยนเป็นผ่าน |
+| 2026-10-08 | ส่งต่อส่วนท้าย HANDOFF หลังการเชื่อมต่อสะดุด | Documentation only ไม่ใช่การแก้โค้ด EA |
+
+### Update procedure
+
+1. เปลี่ยน Last updated
+2. อัปเดต current baseline ให้ตรง Commit ที่ใช้จริง
+3. บันทึกผล Compile จริง ไม่ยกผลของรุ่นก่อนมาแทน
+4. เปลี่ยน Checklist เฉพาะข้อที่มีหลักฐาน
+5. เพิ่มข้อ [-] ลง Known Issues / Runtime FAIL register
+6. ระบุ Fixed commit และ Retest evidence
+7. ไม่ลบประวัติ FAIL เพื่อให้เอกสารดูผ่าน
+8. แยก Code implemented / Compile passed / Runtime passed
+9. หากข้อมูลยังไม่ครบ ให้ระบุ Pending ไม่เดาสถานะ
+
+---
+
+## END OF HANDOFF
+
+จบเอกสาร HANDOFF.md
+
+ก่อนส่งต่อให้ AI ตัวอื่น:
+- ตรวจว่าตารางแต่ละส่วนไม่ซ้ำ
+- ตรวจ Commit baseline
+- แนบผลทดสอบล่าสุดที่เกี่ยวข้อง
+- ห้ามแนบ Token หรือข้อมูลลับ
 
 ### Immediate next action
 
