@@ -25,17 +25,21 @@ https://github.com/vhpknn/HedgeDrift_Minimal
 
 Current baseline commit:
 
-8f4e0bbd1859d3fea7cb75434517fc573081c36b
+334b06e5b33db4a46b764db126aaf9f1ce4937c8
 
 Short hash:
 
-8f4e0bb
+334b06e
 
 Pending local patch:
 
-AuditNames-v1 — readable Symbol/Magic folders and filenames
+ShortAuditPath-v1 — ตัดชั้น Account/Server และย่อ Run folder
 
-Compile ของ AuditNames-v1: [ ]
+AuditNames-v1 อยู่ใน Commit 334b06e แล้ว
+มีภาพ/Log ยืนยันการสร้างชื่อโฟลเดอร์และไฟล์
+ยังไม่ถือว่า CSV contents / Audit integration ผ่านครบ
+
+Compile ของ ShortAuditPath-v1: [ ]
 New commit หลังประกอบ: ยังไม่ระบุ
 
 ก่อนทำ FIND/REPLACE ต้องตรวจซอร์สและ Diff ของฐานที่ใช้จริง
@@ -1209,9 +1213,9 @@ Update after compile/test:
 Code baseline:
 
 - Original Audit implementation: 66ee79c1315de133611f93ee6ac51f5a0d726671
-- Current source baseline: 8f4e0bbd1859d3fea7cb75434517fc573081c36b
-- Pending naming patch: AuditNames-v1
-- Audit build tag หลังประกอบ: 8f4e0bb+AuditNames-v1
+- Current source baseline: 334b06e5b33db4a46b764db126aaf9f1ce4937c8
+- Pending naming patch: ShortAuditPath-v1
+- Audit build tag หลังประกอบ: 334b06e+ShortAuditPath-v1
 - Tag หมายถึง baseline + patch ไม่ใช่ Git hash ของ commit ใหม่
 - Audit implementation: มีโค้ดแล้ว ตรวจจาก Git Diff
 - Compile ของ naming patch: [ ]
@@ -1238,20 +1242,30 @@ Scope:
 
 Output:
 
-MQL5\Files\HedgeDrift\Audit\<symbol_magic>\<account_serverhash>\<run-id>\
+MQL5\Files\HedgeDrift\Audit\<symbol_magic>\<YYYYMMDD_HHMMSS_NN>\
 
 Example:
 
-MQL5\Files\HedgeDrift\Audit\XAUUSD_998856\<login>_<serverhash>\<run-id>\
-- XAUUSD_998856_config.json
-- XAUUSD_998856_events.csv
+MQL5\Files\HedgeDrift\Audit\XAGUSD_9999\20261008_145918_01\
+- XAGUSD_9999_config.json
+- XAGUSD_9999_events.csv
+
+File allocation lock:
+
+MQL5\Files\HedgeDrift\Audit\XAGUSD_9999\.audit_run.lock
+
+run_folder เป็นชื่อสั้นสำหรับ Path
+run_id เต็มเดิมยังอยู่ใน Config/CSV
 
 Rules:
 
 - แยกโฟลเดอร์แรกตาม Symbolจริง + Magic
 - คง suffix ของ Symbol เช่น XAUUSDm
-- แยก Account/Server ในโฟลเดอร์ถัดไป
-- แยก RunID ไม่ Append ทับรอบเก่า
+- Account/Server เก็บใน Config ไม่เป็นชั้นโฟลเดอร์ Audit
+- แยก Run folder แบบวันเวลา+ลำดับ ไม่ Append ทับรอบเก่า
+- ลำดับ 01–99 ตรวจภายใน Symbol_Magic เดียวกัน
+- ใช้ allocation lock ระหว่างเลือกชื่อและสร้างสองไฟล์
+- ไม่ย้ายหรือลบ Run folders แบบเก่า
 - Symbol ที่มีอักขระต้องห้าม/ยาวเกิน จะ sanitize และเติม Hash
 - config.json ภายในยังบันทึก Symbol/Account/Serverจริง
 - state.json คงตำแหน่ง Persistence เดิม
@@ -1267,8 +1281,11 @@ order_id, deal_id, repeat_count, details_json
 Identity:
 
 - Readable group: Symbol + Magic
-- Account isolation: Account Login + Server hash
-- Run isolation: RunID เดิม
+- Account attribution: Account Login/Server ใน Config
+- ไม่มีชั้น Account/Server ใน Audit Path
+- Run folder: YYYYMMDD_HHMMSS_NN
+- Run identity ในข้อมูล: run_id เต็มเดิม
+- ไฟล์ข้ามบัญชีไม่ใช้ร่วม Run เดียวกัน
 - Symbol hash ใช้ต่อท้ายชื่อเฉพาะกรณี sanitize/shorten
 - ข้อมูลตัวตนจริงยังอยู่ใน config และ CSV
 
@@ -1338,11 +1355,24 @@ Checklist:
 | AUD-N06 | [ ] | Audit OFF | ไม่สร้าง Run folder ใหม่ |
 | AUD-N07 | [ ] | ตรวจ Persistence | state.json เดิมไม่ถูกย้ายหรือเปลี่ยน Identity |
 
+### Short Audit Path Checklist
+
+| ID | Status | Action | Expected |
+|---|---|---|---|
+| AUD-S01 | [ ] | Audit ON | Path เป็น Symbol_Magic/วันเวลา_ลำดับ ไม่มี Account layer |
+| AUD-S02 | [ ] | ตรวจ Config | Account/Serverจริงยังอยู่ run_folderสั้น run_idเต็ม |
+| AUD-S03 | [ ] | เริ่ม Run ใหม่ | ไม่เขียนทับ Config/Eventsของ Runเก่า |
+| AUD-S04 | [ ] | มีชื่อเวลาเดียวกันอยู่แล้ว | เลือกลำดับถัดไป |
+| AUD-S05 | [ ] | Audit OFF | ไม่สร้าง Run หรือ allocation lock ใหม่ |
+| AUD-S06 | [ ] | ตรวจ state.json | Persistence path/identityเดิมไม่เปลี่ยน |
+| AUD-S07 | [ ] | Audit allocation/write failed | ปิดเฉพาะ Audit ไม่ใช้ผลนี้หยุด Core |
+| AUD-S08 | [ ] | ตรวจ Run เก่า | โฟลเดอร์เก่ายังอยู่ ไม่ย้าย/ลบ |
+
 ### Lean Audit Validation Record
 
-- Audit code baseline: 8f4e0bb
+- Audit code baseline: 334b06e
 - Audit implementation commit: 66ee79c
-- Audit naming patch: AuditNames-v1
+- Audit naming patch: ShortAuditPath-v1
 - Audit naming compile result: ยังไม่มีผลยืนยันในเอกสารนี้
 - Audit Runtime validation: ยังรอหลักฐาน
 - Audit ON/OFF comparison: [ ]

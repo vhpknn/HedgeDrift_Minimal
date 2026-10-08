@@ -3,7 +3,7 @@
 
 #include "RuntimeState.mqh"
 
-#define HD_AUDIT_BUILD "8f4e0bb+AuditNames-v1"
+#define HD_AUDIT_BUILD "334b06e+ShortAuditPath-v1"
 
 struct HD_AuditGate
 {
@@ -22,10 +22,12 @@ private:
    bool m_active;
    bool m_overflow_warned;
    int m_file;
+   int m_run_lock;
 
    string m_run;
    string m_program;
    string m_folder;
+   string m_run_folder;
 
    string m_rows[64];
    int m_head;
@@ -70,6 +72,86 @@ private:
          safe_symbol += "_" + IntegerToString((long)Hash(_Symbol));
 
       return safe_symbol + "_" + U(InpMagicNumber);
+   }
+
+   void ReleaseRunLock()
+   {
+      if(m_run_lock != INVALID_HANDLE)
+      {
+         FileClose(m_run_lock);
+         m_run_lock = INVALID_HANDLE;
+      }
+   }
+
+   bool PrepareRunPaths(const string stem,
+                        string &config_path,
+                        string &events_path)
+   {
+      string root = "HedgeDrift\\Audit";
+      string symbol_folder = root + "\\" + stem;
+
+      FolderCreate("HedgeDrift");
+      FolderCreate(root);
+      FolderCreate(symbol_folder);
+
+      // Serialize allocation between cooperating EA instances.
+      // No waiting loop: failure disables Audit only.
+      m_run_lock = FileOpen(
+         symbol_folder + "\\.audit_run.lock",
+         FILE_READ | FILE_WRITE | FILE_BIN
+      );
+
+      if(m_run_lock == INVALID_HANDLE)
+      {
+         Disable("Cannot reserve Audit run path");
+         return false;
+      }
+
+      MqlDateTime local;
+
+      if(!TimeToStruct(TimeLocal(), local))
+      {
+         Disable("Cannot read local date/time for Audit folder");
+         return false;
+      }
+
+      string date_time = StringFormat(
+         "%04d%02d%02d_%02d%02d%02d",
+         local.year, local.mon, local.day,
+         local.hour, local.min, local.sec
+      );
+
+      for(int sequence = 1; sequence <= 99; sequence++)
+      {
+         string candidate =
+            date_time + "_" + StringFormat("%02d", sequence);
+
+         string folder = symbol_folder + "\\" + candidate;
+
+         string candidate_config =
+            folder + "\\" + stem + "_config.json";
+
+         string candidate_events =
+            folder + "\\" + stem + "_events.csv";
+
+         // Keep even incomplete old runs. Never overwrite their files.
+         if(FileIsExist(candidate_config) ||
+            FileIsExist(candidate_events))
+            continue;
+
+         FolderCreate(folder);
+
+         m_run_folder = candidate;
+         m_folder = folder;
+         config_path = candidate_config;
+         events_path = candidate_events;
+
+         // Keep the allocation lock until both files are created.
+         return true;
+      }
+
+      Disable("Audit run sequence exhausted for this second");
+      return false;
    }
 
    ulong ClockMS()
@@ -117,6 +199,8 @@ private:
 
    void Disable(const string reason)
    {
+      ReleaseRunLock();
+
       if(m_file != INVALID_HANDLE)
       {
          FileClose(m_file);
@@ -167,10 +251,11 @@ private:
 
       AddConfig(body, "audit_build", HD_AUDIT_BUILD);
       AddConfig(body, "source_baseline",
-         "8f4e0bbd1859d3fea7cb75434517fc573081c36b");
+         "334b06e5b33db4a46b764db126aaf9f1ce4937c8");
       AddConfig(body, "audit_implementation_baseline",
          "66ee79c1315de133611f93ee6ac51f5a0d726671");
       AddConfig(body, "audit_folder", m_folder);
+      AddConfig(body, "run_folder", m_run_folder);
       AddConfig(body, "config_file", AuditStem() + "_config.json");
       AddConfig(body, "events_file", AuditStem() + "_events.csv");
       AddConfig(body, "run_id", m_run);
@@ -234,6 +319,8 @@ public:
       m_active = false;
       m_overflow_warned = false;
       m_file = INVALID_HANDLE;
+      m_run_lock = INVALID_HANDLE;
+      m_run_folder = "";
       m_head = 0;
       m_count = 0;
       m_sequence = 0;
@@ -304,30 +391,11 @@ public:
 
       string stem = AuditStem();
 
-      string account_identity =
-         StringFormat("%I64d", AccountInfoInteger(ACCOUNT_LOGIN)) + "_" +
-         IntegerToString((long)Hash(AccountInfoString(ACCOUNT_SERVER)));
+      string config_path = "";
+      string events_path = "";
 
-      string root = "HedgeDrift\\Audit";
-      string symbol_folder = root + "\\" + stem;
-      string owner = symbol_folder + "\\" + account_identity;
-      m_folder = owner + "\\" + m_run;
-
-      string config_path = m_folder + "\\" + stem + "_config.json";
-      string events_path = m_folder + "\\" + stem + "_events.csv";
-
-      FolderCreate("HedgeDrift");
-      FolderCreate(root);
-      FolderCreate(symbol_folder);
-      FolderCreate(owner);
-      FolderCreate(m_folder);
-
-      if(FileIsExist(config_path) ||
-         FileIsExist(events_path))
-      {
-         Disable("Run path collision");
+      if(!PrepareRunPaths(stem, config_path, events_path))
          return;
-      }
 
       int config_file = FileOpen(
          config_path,
@@ -378,6 +446,7 @@ public:
          return;
       }
 
+      ReleaseRunLock();
       m_active = true;
       m_last_pump = ClockMS();
 
@@ -579,6 +648,8 @@ public:
 
    void Stop(const int reason)
    {
+      ReleaseRunLock();
+
       if(!m_active)
          return;
 
