@@ -107,6 +107,7 @@ bool HD_SaveState()
    g_accounting.SaveState(g_state);
    g_risk.SaveState(g_state);
    g_strategy.SaveState(g_state);
+   g_trade.SaveOpeningState(g_state);
 
    bool success = g_state.Commit();
 
@@ -216,17 +217,24 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
 
    if(g_trade.Count() > 0 ||
       g_trade.PendingCount() > 0 ||
-      g_strategy.HasReHedgeIntent())
+      g_strategy.HasReHedgeIntent() ||
+      g_trade.OpeningPending())
    {
       Print("[HedgeDrift][WARN] Open rejected: ",
             "basket/order/request already active.");
       return false;
    }
 
-   // Manual bypasses strategy entry filters, not trade/risk safety.
    if(!manual && !g_strategy.SessionAllowed())
    {
       Print("[HedgeDrift][WARN] Automatic entry blocked outside sessions.");
+      return false;
+   }
+
+   if(!g_trade.PrepareOpeningJournal(direction, InpStartLot))
+   {
+      g_strategy.OpenFailed();
+      HD_SaveState();
       return false;
    }
 
@@ -234,50 +242,95 @@ bool HD_OpenBasket(const ENUM_TRADE_DIRECTION direction,
    g_risk.Init();
    HD_SetCycle(HD_OPENING);
 
-   // Save intent first; never repeat it blindly after a restart.
    if(!HD_SaveState())
+   {
+      // No opening request has been sent in this invocation.
+      g_trade.FinishOpeningJournal();
+      HD_SetCycle(HD_IDLE);
+      g_strategy.OpenFailed();
       return false;
+   }
 
    bool opened = g_trade.Open(direction, InpStartLot);
    int count = g_trade.Count();
 
-   // Even a failed hedge may leave a residual position.
+   bool complete =
+      opened &&
+      g_trade.OpeningExposureComplete() &&
+      g_trade.PendingCount() == 0;
+
    if(count > 0)
    {
       g_strategy.BasketOpened();
 
       if(!g_risk.BeginBasket())
       {
-         Print("[HedgeDrift][ERROR] Risk snapshot failed; closing basket.");
+         Print("[HedgeDrift][ERROR] Risk snapshot failed; ",
+               "closing observed positions and retaining opening journal.");
+
+         g_risk.RequestClose();
          HD_SetCycle(HD_CLOSING);
+         HD_SaveState();
+
          g_trade.CloseAll();
+         HD_ReconcileDeals(true);
+         HD_SaveState();
 
-         if(g_trade.Count() == 0)
-            g_strategy.BasketClosed();
-
-         HD_SetCycle(g_trade.Count() > 0 ? HD_ACTIVE : HD_IDLE);
          return false;
       }
 
-      HD_SetCycle(HD_ACTIVE);
-
-      if(opened && direction == DIR_HEDGE &&
-         g_trade.CountSide(POSITION_TYPE_BUY) == 1 &&
-         g_trade.CountSide(POSITION_TYPE_SELL) == 1)
+      if(complete)
       {
-         g_strategy.ArmReHedge();
+         // Risk snapshot and cleared journal are saved together below.
+         g_trade.FinishOpeningJournal();
+         HD_SetCycle(HD_ACTIVE);
+
+         if(direction == DIR_HEDGE &&
+            g_trade.CountSide(POSITION_TYPE_BUY) == 1 &&
+            g_trade.CountSide(POSITION_TYPE_SELL) == 1)
+            g_strategy.ArmReHedge();
+      }
+      else
+      {
+         g_risk.RequestClose();
+         HD_SetCycle(HD_CLOSING);
+
+         Print("[HedgeDrift][ERROR] Opening incomplete or unresolved. ",
+               "Closing observed positions; new entries remain blocked.");
       }
    }
    else
    {
-      HD_SetCycle(HD_IDLE);
+      if(g_trade.OpeningNoExecution() &&
+         g_trade.PendingCount() == 0)
+      {
+         g_trade.FinishOpeningJournal();
+         HD_SetCycle(HD_IDLE);
+         g_strategy.OpenFailed();
+      }
+      else
+      {
+         g_risk.RequestClose();
+         HD_SetCycle(HD_CLOSING);
+
+         Print("[HedgeDrift][ERROR] Opening execution unresolved. ",
+               "Zero positions is not proof of no execution. ",
+               "Opening journal retained; no automatic resend.");
+      }
    }
 
-   if(count == 0 && g_trade.PendingCount() == 0)
-      g_strategy.OpenFailed();
+   if(g_audit.Active())
+   {
+      g_audit.Record("BASKET_OPEN_JOURNAL",
+         "{\"direction\":" + IntegerToString((int)direction) +
+         ",\"complete\":" + g_audit.Bool(complete) +
+         ",\"pending\":" + g_audit.Bool(g_trade.OpeningPending()) +
+         ",\"positions\":" + IntegerToString(g_trade.Count()) +
+         ",\"orders\":" + IntegerToString(g_trade.PendingCount()) + "}");
+   }
 
    HD_SaveState();
-   return opened && count > 0;
+   return complete && count > 0;
 }
 
 enum ENUM_HD_RH_RESOLUTION
@@ -931,6 +984,7 @@ void HD_RunPhase3()
       !trailing_action &&
       !g_strategy.ReHedgeActive() &&
       !g_strategy.HasReHedgeIntent() &&
+      !g_trade.OpeningPending() &&
       g_recovery_ok &&
       g_storage_ok &&
       g_trade.PendingCount() == 0)
@@ -987,6 +1041,34 @@ int OnInit()
    {
       if(!g_state.Load())
          return INIT_FAILED;
+
+      bool saved_opening = false;
+
+      if(g_state.Has("open_journal_version"))
+      {
+         if(g_state.I("open_journal_version") != 1)
+            return INIT_FAILED;
+
+         saved_opening = g_state.B("open_pending");
+      }
+      else
+      {
+         // Legacy OPENING has no durable per-leg execution evidence.
+         saved_opening =
+            g_state.I("rt_cycle") == (int)HD_OPENING;
+      }
+
+      if(!g_state.Good())
+         return INIT_FAILED;
+
+      if(saved_opening)
+      {
+         Print("[HedgeDrift][ERROR] Saved ordinary opening is unresolved. ",
+               "Inspect orders, positions and history before recovery. ",
+               "No automatic resend or fresh-state overwrite.");
+
+         return INIT_FAILED;
+      }
 
       bool settings_match = g_state.SettingsMatch();
 
@@ -1213,7 +1295,8 @@ void OnChartEvent(const int id,
       bool empty =
          g_trade.Count() == 0 &&
          g_trade.PendingCount() == 0 &&
-         !g_strategy.HasReHedgeIntent();
+         !g_strategy.HasReHedgeIntent() &&
+         !g_trade.OpeningPending();
 
       if(action == HD_ACTION_MODE)
       {

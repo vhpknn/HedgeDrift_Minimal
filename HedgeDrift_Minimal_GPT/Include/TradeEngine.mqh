@@ -14,6 +14,58 @@ private:
    bool   m_open_attempted;
    double m_open_requested_volume;
 
+   bool m_opening_pending;
+   ENUM_TRADE_DIRECTION m_opening_direction;
+   double m_opening_lot;
+
+   bool m_opening_required[2];
+   bool m_opening_attempted[2];
+   bool m_opening_captured[2];
+   bool m_opening_no_execution[2];
+   uint m_opening_retcode[2];
+   ulong m_opening_order[2];
+   ulong m_opening_deal[2];
+
+   void ResetOpeningJournal()
+   {
+      m_opening_pending = false;
+      m_opening_direction = DIR_BOTH;
+      m_opening_lot = 0.0;
+
+      for(int i = 0; i < 2; i++)
+      {
+         m_opening_required[i] = false;
+         m_opening_attempted[i] = false;
+         m_opening_captured[i] = false;
+         m_opening_no_execution[i] = false;
+         m_opening_retcode[i] = 0;
+         m_opening_order[i] = 0;
+         m_opening_deal[i] = 0;
+      }
+   }
+
+   bool OpeningResultNoExecution()
+   {
+      if(m_result.order != 0 || m_result.deal != 0)
+         return false;
+
+      switch(m_result.retcode)
+      {
+         case TRADE_RETCODE_REJECT:
+         case TRADE_RETCODE_INVALID:
+         case TRADE_RETCODE_INVALID_VOLUME:
+         case TRADE_RETCODE_INVALID_PRICE:
+         case TRADE_RETCODE_INVALID_STOPS:
+         case TRADE_RETCODE_TRADE_DISABLED:
+         case TRADE_RETCODE_MARKET_CLOSED:
+         case TRADE_RETCODE_NO_MONEY:
+         case TRADE_RETCODE_INVALID_FILL:
+            return true;
+      }
+
+      return false;
+   }
+
    bool CheckResult(const bool sent, const string action)
    {
       uint code = m_result.retcode;
@@ -235,6 +287,28 @@ private:
 
       if(position_ticket == 0)
       {
+         if(m_opening_pending)
+         {
+            int leg = buy ? 0 : 1;
+
+            if(!m_opening_required[leg])
+               return false;
+
+            m_opening_attempted[leg] = true;
+            m_opening_captured[leg] = false;
+            m_opening_no_execution[leg] = false;
+
+            // Persist an unresolved attempt before sending.
+            if(!HD_SaveState())
+            {
+               // This invocation did not reach OrderSend.
+               m_opening_attempted[leg] = false;
+               m_opening_captured[leg] = true;
+               m_opening_no_execution[leg] = true;
+               return false;
+            }
+         }
+
          m_open_attempted = true;
          m_open_requested_volume = request.volume;
       }
@@ -267,7 +341,28 @@ private:
 
    bool SendLeg(const bool buy, const double lot)
    {
-      return SendMarket(buy, lot, 0, buy ? "BUY" : "SELL");
+      bool result = SendMarket(
+         buy, lot, 0, buy ? "BUY" : "SELL"
+      );
+
+      if(m_opening_pending)
+      {
+         int leg = buy ? 0 : 1;
+
+         m_opening_captured[leg] = true;
+         m_opening_retcode[leg] = m_result.retcode;
+         m_opening_order[leg] = m_result.order;
+         m_opening_deal[leg] = m_result.deal;
+
+         m_opening_no_execution[leg] =
+            !m_opening_attempted[leg] || OpeningResultNoExecution();
+
+         // Preserve this leg before any next opening/rollback request.
+         if(!HD_SaveState())
+            return false;
+      }
+
+      return result;
    }
 
    bool CloseTicket(const ulong ticket)
@@ -332,6 +427,7 @@ private:
 public:
    bool Init(const string symbol, const ulong magic)
    {
+      ResetOpeningJournal();
       m_symbol = symbol;
       m_magic  = magic;
       m_busy   = false;
@@ -354,6 +450,136 @@ public:
             EnumToString(filling));
 
       return true;
+   }
+
+   bool PrepareOpeningJournal(const ENUM_TRADE_DIRECTION direction,
+                              const double requested_lot)
+   {
+      if(m_opening_pending)
+         return false;
+
+      if(direction != DIR_BUY_ONLY &&
+         direction != DIR_SELL_ONLY &&
+         direction != DIR_HEDGE)
+         return false;
+
+      double lot = NormalizeLot(requested_lot);
+
+      if(!MathIsValidNumber(lot) || lot <= 0.0)
+         return false;
+
+      ResetOpeningJournal();
+
+      m_opening_pending = true;
+      m_opening_direction = direction;
+      m_opening_lot = lot;
+
+      m_opening_required[0] =
+         direction == DIR_BUY_ONLY || direction == DIR_HEDGE;
+
+      m_opening_required[1] =
+         direction == DIR_SELL_ONLY || direction == DIR_HEDGE;
+
+      return true;
+   }
+
+   bool OpeningPending()
+   {
+      return m_opening_pending;
+   }
+
+   bool OpeningNoExecution()
+   {
+      if(!m_opening_pending)
+         return false;
+
+      for(int i = 0; i < 2; i++)
+      {
+         if(!m_opening_required[i])
+            continue;
+
+         // Used only after Open() returns in this running invocation.
+         if(!m_opening_attempted[i])
+            continue;
+
+         if(!m_opening_captured[i] || !m_opening_no_execution[i])
+            return false;
+      }
+
+      return true;
+   }
+
+   bool OpeningExposureComplete()
+   {
+      if(!m_opening_pending ||
+         !MathIsValidNumber(m_opening_lot) ||
+         m_opening_lot <= 0.0 ||
+         PendingCount() > 0)
+         return false;
+
+      double step = SymbolInfoDouble(m_symbol, SYMBOL_VOLUME_STEP);
+
+      if(!MathIsValidNumber(step) || step <= 0.0)
+         return false;
+
+      double tolerance = MathMax(
+         step * 1e-7,
+         8.0 * DBL_EPSILON * m_opening_lot
+      );
+
+      for(int i = 0; i < 2; i++)
+      {
+         ENUM_POSITION_TYPE side =
+            i == 0 ? POSITION_TYPE_BUY : POSITION_TYPE_SELL;
+
+         int expected = m_opening_required[i] ? 1 : 0;
+
+         if(CountSide(side) != expected)
+            return false;
+
+         if(expected == 0)
+            continue;
+
+         ulong ticket = TicketForSide(side);
+
+         if(ticket == 0 || !PositionSelectByTicket(ticket))
+            return false;
+
+         double volume = PositionGetDouble(POSITION_VOLUME);
+
+         if(!MathIsValidNumber(volume) ||
+            MathAbs(volume - m_opening_lot) > tolerance)
+            return false;
+      }
+
+      return true;
+   }
+
+   void FinishOpeningJournal()
+   {
+      m_opening_pending = false;
+   }
+
+   void SaveOpeningState(CHDPersistence &state)
+   {
+      state.PutU("open_journal_version", 1);
+      state.PutU("open_pending", (ulong)m_opening_pending);
+      state.PutU("open_direction", (ulong)m_opening_direction);
+      state.PutD("open_lot", m_opening_lot);
+
+      for(int i = 0; i < 2; i++)
+      {
+         string key = "open_leg_" + IntegerToString(i);
+
+         state.PutU(key + "_required", (ulong)m_opening_required[i]);
+         state.PutU(key + "_attempted", (ulong)m_opening_attempted[i]);
+         state.PutU(key + "_captured", (ulong)m_opening_captured[i]);
+         state.PutU(key + "_no_execution",
+                    (ulong)m_opening_no_execution[i]);
+         state.PutU(key + "_retcode", (ulong)m_opening_retcode[i]);
+         state.PutU(key + "_order", m_opening_order[i]);
+         state.PutU(key + "_deal", m_opening_deal[i]);
+      }
    }
 
    void GetOpeningReceipt(bool &no_execution,

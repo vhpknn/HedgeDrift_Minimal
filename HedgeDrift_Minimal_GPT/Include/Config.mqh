@@ -109,6 +109,8 @@ bool HD_ReadValidTick(const string symbol, MqlTick &tick)
       tick.ask >= tick.bid;
 }
 
+bool HD_SaveState();
+
 string HD_OrderComment()
 {
    return "HedgeDrift_RR1:"
