@@ -23,24 +23,40 @@ Repository:
 
 https://github.com/vhpknn/HedgeDrift_Minimal
 
-Current baseline commit:
+Current code baseline commit:
 
-334b06e5b33db4a46b764db126aaf9f1ce4937c8
+3430a30ed17143c02055dfee05299dede68c188b
 
 Short hash:
 
-334b06e
+3430a30
 
-Pending local patch:
+Latest compile reported by user:
 
-ShortAuditPath-v1 — ตัดชั้น Account/Server และย่อ Run folder
+0 errors, 0 warnings, 4844 ms
 
-AuditNames-v1 อยู่ใน Commit 334b06e แล้ว
-มีภาพ/Log ยืนยันการสร้างชื่อโฟลเดอร์และไฟล์
-ยังไม่ถือว่า CSV contents / Audit integration ผ่านครบ
+Report date:
 
-Compile ของ ShortAuditPath-v1: [ ]
-New commit หลังประกอบ: ยังไม่ระบุ
+2026-10-10
+
+Pending approved local code patch:
+
+ไม่มี Patch ใหม่ที่อนุมัติให้วางในขณะนี้
+ชุด OPEN-01–03 ประกอบและ Commit แล้ว
+
+Validation status:
+
+- ตรวจ Git Diff ว่าประกอบ Patch แล้ว
+- Compile ผ่านตามผลที่ผู้ใช้รายงาน
+- Runtime ใน MT5 ยังไม่ยืนยัน
+- Master Integration Test ยังไม่ถือว่าผ่าน
+- ผลแบบจำลอง Python ไม่ใช่ผล Runtime ของ EA
+
+Next action:
+
+ทดสอบรวมจากฐาน 3430a30 ด้วย .set หลักหกชุด
+เก็บหลักฐานตาม Master Checklist และแก้เฉพาะ FAIL ที่ยืนยันได้
+ไม่เพิ่มฟีเจอร์หรือขยาย Recovery อัตโนมัติโดยไม่มีการอนุมัติ
 
 ก่อนทำ FIND/REPLACE ต้องตรวจซอร์สและ Diff ของฐานที่ใช้จริง
 ห้ามใช้ ac464b0, 8ed35ad, 98b6bc4 หรือ eb2033c เป็นฐานล่าสุดของฟีเจอร์ใหม่โดยไม่ตั้งใจ
@@ -1504,6 +1520,133 @@ Include อยู่ข้างไฟล์ EA ภายในโฟลเด�
 9. หากข้อมูลยังไม่ครบ ให้ระบุ Pending ไม่เดาสถานะ
 
 ---
+
+---
+
+## Latest Integration Checkpoint — 2026-10-10
+
+### Source of truth
+
+- Repository: vhpknn/HedgeDrift_Minimal
+- Current code baseline:
+  3430a30ed17143c02055dfee05299dede68c188b
+- Latest compile reported by user:
+  0 errors, 0 warnings, 4844 ms
+- Compile result is user-reported.
+- Runtime validation remains pending.
+
+หาก Commit ถัดไปแก้เฉพาะเอกสาร ให้คง hash นี้เป็น Code baseline
+และระบุ Documentation commit แยก ไม่อ้างว่าโค้ดเปลี่ยนตามเอกสาร
+
+### Implemented changes
+
+| Group | Code checkpoint | Implementation | Runtime |
+|---|---|---|---|
+| Mirror Boundary / Quote Guard | 7e15385 | ประกอบแล้ว | [ ] |
+| Re-Hedge Receipt / History Resolver | 56c888a | ประกอบแล้ว | [ ] |
+| Cancel / Waiting / Chronological Re-Lock | 6eab3de | ประกอบแล้ว | [ ] |
+| Cancel Reset / Re-Lock eligibility | 46e54d4 | ประกอบแล้ว | [ ] |
+| Ordinary Opening Guard OPEN-01–03 | 3430a30 | ประกอบแล้ว | [ ] |
+
+ห้ามตีความ Implementation หรือ Compile ผ่านว่า Runtime ผ่าน
+
+### Ordinary Opening Guard — OPEN-01–03
+
+- OPEN-01:
+  ไม่ใช้ Position=0/Pending=0 เพียงอย่างเดียวคืนสิทธิ์ Retry
+  Opening ที่ไม่ยืนยันคง Journal และบล็อก Entry
+
+- OPEN-02:
+  Capture และ Save ผล BUY/SELL แยกขา
+  ก่อนขาถัดไปหรือ Rollback เขียนทับผลคำขอ
+
+- OPEN-03:
+  เก็บหลักฐานเปิดแม้ Position ปิดไปก่อนจบขั้นตอน
+  ไม่ตีความว่าไม่เคย Execute จากจำนวน Position ปัจจุบัน
+
+Journal fields:
+
+- open_journal_version=1
+- open_pending
+- open_direction
+- open_lot
+- open_leg_0_* = BUY
+- open_leg_1_* = SELL
+
+Policy:
+
+- ไม่ Auto-Adopt หรือ Auto-Retry เมื่อหลักฐานไม่พอ
+- Saved open_pending=true ทำให้ Init ถูกปฏิเสธ
+- ไม่ Fresh Start เขียนทับ Opening ที่ค้าง
+- ห้ามลบ State หรือเปลี่ยน open_pending เพื่อหลบ Guard
+- ถ้า Init ล้มเหลว EA ไม่ได้รัน BE/RR/Trailing
+- ต้องตรวจ Position และ SL ที่มีอยู่ใน Terminal
+
+### Persistence and Recovery limits
+
+- หลักฐานข้าม Restart ต้องใช้ Persistence ON
+- Persistence OFF ไม่รับรอง Recovery ข้าม Restart
+- Unknown/Partial ไม่ถือเป็น Full Fill
+- Rollback ที่เห็น Position=0 ยังไม่ใช่หลักฐานจบคำขอทั้งหมด
+- ไฟล์หลักและ Backup สูญหายทั้งหมดไม่อยู่ในขอบเขตรับรองนี้
+- P4-14 ต้องมีหลักฐาน Runtime จึงเปลี่ยนสถานะผ่านได้
+
+### Main test presets — unchanged
+
+| Preset | Magic |
+|---|---:|
+| 01_Manual_FixedBE.set | 998901 |
+| 02_Manual_DynamicBE.set | 998902 |
+| 03_Manual_BasketRR.set | 998903 |
+| 04_Timeout_Trailing_ReHedge.set | 998904 |
+| 05_Lock_Crossing.set | 998905 |
+| 06_Lock_Session.set | 998906 |
+
+Patch ล่าสุดไม่มี Inputs ใหม่หรือเปลี่ยนชื่อ/ชนิด Inputs
+ใช้หกชุดเดิมได้ แต่ต้องตรวจค่าที่ใช้งานจริงหลังโหลด/Recovery
+
+ชุดย่อย เช่น Re-Lock ON และ RR + Re-Hedge
+ให้บันทึกค่าของรอบย่อยเป็นหลักฐาน ไม่อ้างว่าหกชุดหลักครอบคลุมเองทั้งหมด
+
+### Numerical model checks — not MT5 execution
+
+- BE: 480 mirrored pairs, no mismatches in sampled cases
+- Hard SL: 80 mirrored pairs, no mismatches in sampled cases
+- Trailing boundary: 60 mirrored pairs, no mismatches in sampled cases
+- Re-Lock ordering: 120 event sequences, no mismatches in the model
+- AutoNewCycle OFF cancel model:
+  32 cases; patched model had no re-arm cases
+
+เป็นสูตรที่ถอดไปคำนวณใน Python
+ไม่ใช่การรันไฟล์ EA หรือผล Broker execution
+ไม่ใช้แทนหลักฐาน Runtime
+
+### Remaining validation
+
+- [ ] Audit CSV มี Header และ Events จริง
+- [ ] BUY/SELL เปิด ปิด SL BE RR และ Trailing ตามกรณีคู่
+- [ ] Re-Hedge เติมเฉพาะขาที่หายหลังครบเวลา
+- [ ] Close All/RR ไม่ปลุกสิทธิ์ของรอบเดิมเมื่อ AutoNewCycle OFF
+- [ ] Waiting กลับมากระทบยอดได้โดยไม่เปิดคำขอซ้ำ
+- [ ] Cancel และ late Fill เก็บหลักฐานจนคำขอจบ
+- [ ] Restart ไม่ลงบัญชีซ้ำ
+- [ ] Chronological Re-Lock ไม่ย้อนเหตุการณ์
+- [ ] Ordinary Opening unresolved ถูกบล็อกตามนโยบาย
+- [ ] Master Integration Test ตาม Checklist เดิม
+
+ข้อที่ยังไม่ได้จำลองหรือหลักฐานไม่พอ คง Pending
+ไม่ใช้ “ไม่มี Error Log” เป็นหลักฐานผ่าน
+
+### Scope freeze
+
+ไม่เพิ่ม Auto-Lot, Inputs, UI, กลยุทธ์ใหม่ หรือ Auto-Recovery
+ที่เดาผลคำขอ ก่อนทดสอบรวม
+
+แก้เพิ่มเฉพาะข้อผิดพลาดที่มีหลักฐานและกระทบ
+การเปิดซ้ำ การปิด Position ความเสี่ยง หรือบัญชี
+
+รวบผลทดสอบครั้งเดียว แล้วแก้ตาม FAIL
+ไม่วนทดสอบทีละ Patch โดยไม่จำเป็น
 
 ## END OF HANDOFF
 
