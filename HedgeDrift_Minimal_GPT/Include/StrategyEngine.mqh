@@ -270,7 +270,12 @@ public:
 
       // Report the transition, not every pass while cancellation is pending.
       bool had_state =
-         m_rh_armed || m_buy_wait || m_sell_wait;
+         m_rh_armed || m_buy_wait || m_sell_wait || m_relock_pending;
+
+      m_relock_pending = false;
+
+      if(!g_hd.auto_new_cycle)
+         m_spent = true;
 
       m_rh_armed = false;
       m_buy_wait = false;
@@ -288,6 +293,7 @@ public:
       {
          g_audit.Record("RH_CANCEL",
             "{\"armed\":false,\"buy_wait\":false,\"sell_wait\":false,"
+            "\"relock_pending\":false,"
             "\"intent\":" + g_audit.Bool(m_rh_intent) +
             ",\"intent_since\":" +
             g_audit.U((ulong)m_rh_intent_since) + ","
